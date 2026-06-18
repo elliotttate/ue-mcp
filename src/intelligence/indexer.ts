@@ -230,18 +230,21 @@ export class Indexer {
     const diff = diffManifest(activeManifest, files, fullRebuild);
     log(`${diff.added.length} added, ${diff.changed.length} changed, ${diff.removed.length} removed`);
 
-    // Evict stale chunks from the store.
+    // Evict removed sources. When the editor is offline we did not scan assets,
+    // so a previously-indexed blueprint is "missing" only because we skipped it —
+    // do NOT treat it as removed, or every offline build would wipe the BP index.
+    const removed = includeAssets
+      ? diff.removed
+      : diff.removed.filter((src) => activeManifest.files[src]?.kind !== "blueprint");
     if (store) {
-      for (const src of diff.removed) {
+      for (const src of removed) {
         const e = activeManifest.files[src];
         if (e) store.remove(e.chunkIds);
         delete activeManifest.files[src];
       }
-      for (const rec of diff.changed) {
-        const e = activeManifest.files[rec.relPath];
-        if (e) store.remove(e.chunkIds);
-      }
     }
+    // NB: changed sources are evicted later, only once their replacement chunks
+    // exist, so a transient extraction failure can never drop an asset.
 
     // Build chunks for everything new or changed.
     const pending: PendingSource[] = [];
@@ -268,6 +271,15 @@ export class Indexer {
       if (chunks.length === 0) continue;
       pending.push({ rec, hash: diff.hashes.get(rec.relPath) ?? hashFile(rec), chunks });
       allChunks.push(...chunks);
+    }
+
+    // Now that replacements exist, evict the prior chunks of each changed source.
+    // (Chunk ids are reused per source, so evict before the upsert below.)
+    if (store) {
+      for (const p of pending) {
+        const prev = activeManifest.files[p.rec.relPath];
+        if (prev) store.remove(prev.chunkIds);
+      }
     }
 
     // Embed in groups for bounded memory + progress.

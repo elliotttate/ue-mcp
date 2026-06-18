@@ -17,10 +17,13 @@ export interface BlueprintSummary {
 
 /** Convert an absolute asset path into a /Game-style path the bridge accepts.
  *  Best-effort; the bridge also resolves project-relative content paths. */
-export function toGamePath(relPosix: string, projectName: string | null): string {
-  // relPosix like "Content/Blueprints/BP_Player.uasset" → "/Game/Blueprints/BP_Player"
-  const m = /(^|.*?\/)Content\/(.+)\.(uasset|umap)$/i.exec(relPosix);
-  if (m) return "/Game/" + m[2];
+export function toGamePath(relPosix: string, _projectName: string | null): string {
+  // Plugin content mounts on its own root: Plugins/Foo/Content/BP.uasset → /Foo/BP
+  const plugin = /(?:^|.*?\/)Plugins\/([^/]+)\/Content\/(.+)\.(?:uasset|umap)$/i.exec(relPosix);
+  if (plugin) return `/${plugin[1]}/${plugin[2]}`;
+  // Project content mounts on /Game: Content/Blueprints/BP.uasset → /Game/Blueprints/BP
+  const game = /(?:^|.*?\/)Content\/(.+)\.(?:uasset|umap)$/i.exec(relPosix);
+  if (game) return "/Game/" + game[1];
   return relPosix.replace(/\.(uasset|umap)$/i, "");
 }
 
