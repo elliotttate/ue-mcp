@@ -28,16 +28,30 @@ import { buildProjectDigest } from "../../src/intelligence/summary.js";
 import type { IBridge } from "../../src/bridge.js";
 import type { VectorEntry } from "../../src/intelligence/types.js";
 
-/** A bridge whose connection can be toggled, answering extract_index_summary. */
+/** A bridge whose connection can be toggled, answering blueprint extraction
+ *  (batch preferred) and counting calls per method. */
 class MockBridge implements IBridge {
   connected = true;
+  calls: Record<string, number> = {};
   get isConnected() {
     return this.connected;
   }
   async connect() {
     /* no-op */
   }
-  async call(method: string) {
+  async call(method: string, params?: Record<string, unknown>) {
+    this.calls[method] = (this.calls[method] ?? 0) + 1;
+    if (method === "extract_index_summaries") {
+      const paths = (params?.paths as string[]) ?? [];
+      return {
+        summaries: paths.map((p) => ({
+          path: p,
+          summary: `Blueprint ${p} parent ACharacter`,
+          dependencies: ["/Game/Core/BP_GameMode"],
+          name: p.split("/").pop(),
+        })),
+      };
+    }
     if (method === "extract_index_summary") {
       return {
         summary: "Blueprint BP_Player parent ACharacter variables Health Stamina",
@@ -313,6 +327,89 @@ describe("subgraph bounds", () => {
     const sg = subgraph(g, "H", 1, 3);
     expect(sg.truncated).toBe(true);
     expect(sg.nodes.length).toBeLessThanOrEqual(3);
+  });
+});
+
+describe("batch blueprint extraction", () => {
+  it("uses the batch handler and avoids per-asset calls", async () => {
+    const dir = tmpProject();
+    try {
+      fs.mkdirSync(path.join(dir, "Content"), { recursive: true });
+      for (const n of ["BP_A", "BP_B", "BP_C"]) {
+        fs.writeFileSync(path.join(dir, "Content", `${n}.uasset`), Buffer.from([0, 1]));
+      }
+      const bridge = new MockBridge();
+      const stats = await new Indexer(dir, "Game", bridge, {}).build({ includeAssets: true });
+      expect(stats.assetsIndexed).toBe(3);
+      expect(bridge.calls["extract_index_summaries"]).toBeGreaterThanOrEqual(1);
+      expect(bridge.calls["extract_index_summary"] ?? 0).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("C++ class hierarchy", () => {
+  it("adds parent edges from class declarations", async () => {
+    const dir = tmpProject();
+    try {
+      fs.writeFileSync(path.join(dir, "Source", "Game", "MyActor.h"), "class MYGAME_API AMyActor : public AActor {};");
+      const { stats } = await new GraphBuilder(dir, "Game", offlineBridge, {}).build({ includeAssets: false });
+      expect(stats.classes).toBeGreaterThanOrEqual(1);
+      const g = loadGraph(dir)!;
+      expect(g.edges.some((e) => e.from === "class:AMyActor" && e.to === "class:AActor" && e.type === "parent")).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe(".gitignore awareness", () => {
+  it("excludes ignored files only when respectGitignore is set", () => {
+    const dir = tmpProject();
+    try {
+      fs.writeFileSync(path.join(dir, ".gitignore"), "Source/Game/Ignored.cpp\n");
+      fs.writeFileSync(path.join(dir, "Source", "Game", "Ignored.cpp"), "int ignored;");
+      fs.writeFileSync(path.join(dir, "Source", "Game", "Kept.cpp"), "int kept;");
+
+      const withGit = walkProject(dir, { includeAssets: false, maxFileSize: 1e6, ignore: [], respectGitignore: true });
+      expect(withGit.some((f) => f.relPath.endsWith("Ignored.cpp"))).toBe(false);
+      expect(withGit.some((f) => f.relPath.endsWith("Kept.cpp"))).toBe(true);
+
+      const withoutGit = walkProject(dir, { includeAssets: false, maxFileSize: 1e6, ignore: [] });
+      expect(withoutGit.some((f) => f.relPath.endsWith("Ignored.cpp"))).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("lexical index + token budget", () => {
+  it("caches the loaded index, gathers candidates, and budgets results", async () => {
+    const dir = tmpProject();
+    try {
+      for (let i = 0; i < 5; i++) {
+        fs.writeFileSync(
+          path.join(dir, "Source", "Game", `F${i}.cpp`),
+          `void Spawn${i}() { /* spawn actor ${i} with health and damage handling */ }`,
+        );
+      }
+      await new Indexer(dir, "Game", offlineBridge, {}).build({ includeAssets: false });
+
+      const a = loadIndex(dir, {})!;
+      const b = loadIndex(dir, {})!;
+      expect(a.store).toBe(b.store); // cached by mtime
+
+      const lex = a.getLexical();
+      expect(lex.candidates(["spawn"]).length).toBeGreaterThan(0);
+
+      const full = await searchIndex(a.store, a.provider, { query: "spawn actor", k: 5, lexical: lex });
+      const budgeted = await searchIndex(a.store, a.provider, { query: "spawn actor", k: 5, lexical: lex, maxTokens: 5 });
+      expect(budgeted.length).toBeGreaterThanOrEqual(1);
+      expect(budgeted.length).toBeLessThanOrEqual(full.length);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -19,9 +19,9 @@ flowchart LR
 
 | Tool | Purpose | Key actions |
 |------|---------|-------------|
-| `index` | Build/maintain the semantic index | `build`, `update`, `status`, `summary`, `clear`, `ingest`, `ignore_patterns` |
+| `index` | Build/maintain the semantic index | `build`, `update`, `status`, `summary`, `watch`, `clear`, `ingest`, `ignore_patterns` |
 | `search` | Retrieve relevant chunks with provenance | `hybrid`, `semantic`, `code_examples`, `references`, `grep` |
-| `graph` | Project knowledge graph | `build`, `project_map`, `hubs`, `neighbors`, `subgraph`, `path`, `find`, `stats` |
+| `graph` | Project knowledge graph | `build`, `project_map`, `hubs`, `neighbors`, `dependents`, `subgraph`, `path`, `find`, `stats` |
 | `memory` | Durable cross-session notes | `list`, `read`, `write`, `append`, `delete` |
 | `context` | Capture live editor working context | `get`, `capture_selection`, `capture_viewport` |
 | `validate` | Check identifiers/code/plans vs reflection | `unreal_code`, `identifiers`, `blueprint_plan` |
@@ -58,10 +58,29 @@ ue-mcp:
       # apiKeyEnv: OPENAI_API_KEY   # env var holding the key (never the key itself)
     image:
       provider: openai       # openai | stability | replicate
+    summarizer:
+      provider: none         # none | openai | ollama  (none = return the digest for the agent to narrate)
     ignore:
       - "Content/Developers/"  # extra gitignore-lite patterns
+    respectGitignore: false    # also honor the project's .gitignore
     maxFileSize: 1048576       # skip text files larger than this (bytes)
+    watch: false               # auto-start the file watcher on server launch
 ```
+
+## Resources
+
+The layer also exposes read-only, browsable MCP resources (no tool call needed):
+
+| URI | Contents |
+|-----|----------|
+| `ue://index/status` | Index build state (provider, dimensions, sources, chunks) |
+| `ue://project-map` | Knowledge-graph overview: node/edge counts and the top hubs |
+| `ue://memory` | List of project memories |
+| `ue://memory/{name}` | A single memory's markdown |
+
+## Keeping the index fresh
+
+`index(action="watch", enabled=true)` starts a debounced file watcher that runs an incremental build whenever project files change (stop with `enabled=false`). Set `intelligence.watch: true` to start it automatically when the server launches. Recursive watching is available on Windows and macOS; where it is unsupported the tool reports so instead of failing.
 
 API keys are always read from **environment variables**, never stored in project config. If a configured API provider's key is missing, indexing falls back to the local embedding with a warning rather than failing.
 
