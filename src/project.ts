@@ -5,6 +5,7 @@ import { dumpYaml } from "./yaml-dump.js";
 import { McpError, ErrorCode } from "./errors.js";
 import { info, warn } from "./log.js";
 import { UProjectSchema, UeMcpConfigSchema } from "./schemas.js";
+import type { IntelligenceConfig } from "./intelligence/config.js";
 import { findEngineInstall } from "./deployer.js";
 import { setInstalledHooks, setFeedbackMode, type FeedbackMode } from "./user-state.js";
 
@@ -27,6 +28,9 @@ export interface UeMcpConfig {
     /** Override bind host. Defaults to 127.0.0.1 — do not expose externally. */
     host?: string;
   };
+  /** Project Intelligence layer config (indexing / retrieval / graph / memory).
+   *  All optional; defaults to a fully local, zero-setup configuration. */
+  intelligence?: IntelligenceConfig;
 }
 
 export class ProjectContext {
@@ -234,7 +238,9 @@ export class ProjectContext {
       );
       return;
     }
-    this.config = parsed.data;
+    // zod widens provider enums to `string` via passthrough; the validated
+    // shape is structurally a UeMcpConfig, so assert across that gap.
+    this.config = parsed.data as UeMcpConfig;
     if (Object.keys(block).length > 0) {
       info("project", `loaded config from ue-mcp.yml`);
     }

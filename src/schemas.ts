@@ -28,6 +28,26 @@ export const UProjectSchema = z
   .passthrough();
 export type UProjectFile = z.infer<typeof UProjectSchema>;
 
+const ProviderRefSchema = z
+  .object({
+    provider: z.string().optional(),
+    model: z.string().optional(),
+    dim: z.number().int().min(16).max(8192).optional(),
+    baseUrl: z.string().optional(),
+    apiKeyEnv: z.string().optional(),
+  })
+  .passthrough();
+
+export const IntelligenceConfigSchema = z
+  .object({
+    embedding: ProviderRefSchema.optional(),
+    image: ProviderRefSchema.optional(),
+    summarizer: ProviderRefSchema.optional(),
+    ignore: z.array(z.string()).optional(),
+    maxFileSize: z.number().int().min(1).optional(),
+  })
+  .passthrough();
+
 export const UeMcpConfigSchema = z
   .object({
     contentRoots: z.array(z.string()).optional(),
@@ -39,6 +59,9 @@ export const UeMcpConfigSchema = z
         host: z.string().optional(),
       })
       .optional(),
+    /** Project Intelligence layer (indexing / retrieval / graph). All optional;
+     *  defaults to a fully local, zero-setup configuration. */
+    intelligence: IntelligenceConfigSchema.optional(),
   })
   .passthrough();
 export type UeMcpConfigFile = z.infer<typeof UeMcpConfigSchema>;
