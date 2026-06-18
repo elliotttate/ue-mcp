@@ -11,7 +11,16 @@ import { chunkText } from "../../src/intelligence/chunker.js";
 import { diffManifest, emptyManifest, manifestEntryFor, hashFile } from "../../src/intelligence/manifest.js";
 import { walkProject } from "../../src/intelligence/walker.js";
 import { searchIndex } from "../../src/intelligence/search.js";
-import { computeScores, shortestPath, neighbors, topHubs, subgraph, type KnowledgeGraph } from "../../src/intelligence/knowledge-graph.js";
+import {
+  computeScores,
+  shortestPath,
+  neighbors,
+  topHubs,
+  subgraph,
+  GraphBuilder,
+  loadGraph,
+  type KnowledgeGraph,
+} from "../../src/intelligence/knowledge-graph.js";
 import { Indexer, loadIndex, indexStatus } from "../../src/intelligence/indexer.js";
 import { toGamePath } from "../../src/intelligence/bp-extract.js";
 import { grepProject } from "../../src/intelligence/grep.js";
@@ -263,6 +272,47 @@ describe("Indexer end-to-end (offline)", () => {
     await indexer.build({ includeAssets: true });
     const idx2 = loadIndex(dir, {})!;
     expect([...idx2.store.sources()].some((s) => s.includes("BP_Player"))).toBe(true);
+  });
+});
+
+describe("knowledge graph from cached manifest deps", () => {
+  it("builds blueprint dependency edges offline after an indexed build", async () => {
+    const dir = tmpProject();
+    try {
+      fs.mkdirSync(path.join(dir, "Content"), { recursive: true });
+      fs.writeFileSync(path.join(dir, "Content", "BP_Player.uasset"), Buffer.from([0, 1, 2]));
+      const bridge = new MockBridge();
+      // Index with the editor "connected" so deps get cached into the manifest.
+      await new Indexer(dir, "Game", bridge, {}).build({ includeAssets: true });
+
+      // Editor goes away; the graph must still get blueprint edges from cache.
+      bridge.connected = false;
+      const { stats } = await new GraphBuilder(dir, "Game", bridge, {}).build();
+      expect(stats.cachedDeps).toBeGreaterThanOrEqual(1);
+      expect(stats.liveDeps).toBe(0);
+
+      const g = loadGraph(dir)!;
+      const edge = g.edges.find((e) => e.from === "/Game/BP_Player" && e.to.includes("BP_GameMode"));
+      expect(edge).toBeTruthy();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("subgraph bounds", () => {
+  it("caps node count and flags truncation", () => {
+    const g: KnowledgeGraph = { version: 1, builtAt: "now", nodes: {}, edges: [], scores: {} };
+    g.nodes["H"] = { id: "H", label: "H", kind: "blueprint" };
+    for (let i = 0; i < 8; i++) {
+      const id = `N${i}`;
+      g.nodes[id] = { id, label: id, kind: "asset" };
+      g.edges.push({ from: "H", to: id, type: "depends_on" });
+    }
+    g.scores = computeScores(g.nodes, g.edges);
+    const sg = subgraph(g, "H", 1, 3);
+    expect(sg.truncated).toBe(true);
+    expect(sg.nodes.length).toBeLessThanOrEqual(3);
   });
 });
 
