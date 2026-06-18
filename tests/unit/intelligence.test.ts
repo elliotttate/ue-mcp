@@ -413,6 +413,42 @@ describe("lexical index + token budget", () => {
   });
 });
 
+describe("mermaid rendering", () => {
+  it("renders a knowledge-graph subset as a flowchart", async () => {
+    const { graphToMermaid } = await import("../../src/intelligence/mermaid.js");
+    const nodes = [
+      { id: "A", label: "BP_Player", kind: "blueprint" as const },
+      { id: "B", label: "BP_GameMode", kind: "asset" as const },
+    ];
+    const edges = [{ from: "A", to: "B", type: "depends_on" as const }];
+    const { mermaid, truncated } = graphToMermaid(nodes, edges, { direction: "LR" });
+    expect(mermaid.startsWith("flowchart LR")).toBe(true);
+    expect(mermaid).toContain('["BP_Player"]');
+    expect(mermaid).toMatch(/n0 --> n1/);
+    expect(truncated).toBe(false);
+  });
+
+  it("renders a blueprint summary with exec (solid) and data (dotted) edges", async () => {
+    const { blueprintSummaryToMermaid } = await import("../../src/intelligence/mermaid.js");
+    const summary = {
+      graphName: "EventGraph",
+      nodes: [
+        { id: "x1", title: "Event BeginPlay" },
+        { id: "x2", title: 'Print "Hi"' },
+        { id: "x3", title: "Get Health" },
+      ],
+      execEdges: [{ from: "x1", to: "x2" }],
+      dataEdges: [{ from: "x3", to: "x2" }],
+    };
+    const { mermaid } = blueprintSummaryToMermaid(summary);
+    expect(mermaid.startsWith("flowchart TD")).toBe(true);
+    expect(mermaid).toContain("Event BeginPlay");
+    expect(mermaid).toContain("Print 'Hi'"); // double quotes sanitized to single
+    expect(mermaid).toMatch(/g0 --> g1/); // exec solid
+    expect(mermaid).toMatch(/g2 -\.-> g1/); // data dotted
+  });
+});
+
 describe("toGamePath", () => {
   it("maps project and plugin content to the correct mount", () => {
     expect(toGamePath("Content/Blueprints/BP_Player.uasset", "Game")).toBe("/Game/Blueprints/BP_Player");

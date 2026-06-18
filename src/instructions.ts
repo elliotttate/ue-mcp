@@ -194,6 +194,7 @@ ue-mcp.yml under ue-mcp.intelligence.embedding to upgrade).
              search(action="grep", query="...", regex=true)   — exact filesystem search, no index needed
   graph    — project knowledge graph: blueprint deps + C++ includes + class hierarchy
              graph(action="build")  then  project_map / hubs / neighbors / dependents / path
+             graph(action="mermaid", node=...) or graph(action="blueprint", path=...) → mermaid diagram
   memory   — durable cross-session notes:  memory(action="write"|"append"|"read"|"list")
   context  — capture live editor selection/viewport:  context(action="get")
   validate — check identifiers/code/blueprint plans vs live reflection (catches hallucinations)

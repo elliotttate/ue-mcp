@@ -21,7 +21,7 @@ flowchart LR
 |------|---------|-------------|
 | `index` | Build/maintain the semantic index | `build`, `update`, `status`, `summary`, `watch`, `clear`, `ingest`, `ignore_patterns` |
 | `search` | Retrieve relevant chunks with provenance | `hybrid`, `semantic`, `code_examples`, `references`, `grep` |
-| `graph` | Project knowledge graph | `build`, `project_map`, `hubs`, `neighbors`, `dependents`, `subgraph`, `path`, `find`, `stats` |
+| `graph` | Project knowledge graph | `build`, `project_map`, `hubs`, `neighbors`, `dependents`, `subgraph`, `path`, `find`, `stats`, `mermaid`, `blueprint` |
 | `memory` | Durable cross-session notes | `list`, `read`, `write`, `append`, `delete` |
 | `context` | Capture live editor working context | `get`, `capture_selection`, `capture_viewport` |
 | `validate` | Check identifiers/code/plans vs reflection | `unreal_code`, `identifiers`, `blueprint_plan` |
@@ -77,6 +77,15 @@ The layer also exposes read-only, browsable MCP resources (no tool call needed):
 | `ue://project-map` | Knowledge-graph overview: node/edge counts and the top hubs |
 | `ue://memory` | List of project memories |
 | `ue://memory/{name}` | A single memory's markdown |
+
+## Diagrams (mermaid)
+
+The graph data renders directly to mermaid, so clients that display mermaid show a diagram (others show the code block):
+
+- `graph(action="mermaid", node="/Game/BP_Player", depth=2)` - a node's dependency neighborhood as a flowchart (omit `node` for a top-hubs overview; `layout` = `LR` or `TD`).
+- `graph(action="blueprint", path="/Game/BP_Player")` - a blueprint's graph rendered from the live editor: execution flow as solid arrows, data flow as dotted. Requires the editor connected.
+
+Because the diagram is generated from the actual node ids and edges, it never drifts from the real graph the way a hand-written diagram can.
 
 ## Keeping the index fresh
 

@@ -18,6 +18,7 @@ import {
   type NodeKind,
   type KnowledgeGraph,
 } from "../intelligence/knowledge-graph.js";
+import { graphToMermaid, blueprintSummaryToMermaid, type BlueprintGraphSummary } from "../intelligence/mermaid.js";
 import type { IntelligenceConfig } from "../intelligence/config.js";
 
 function cfgOf(ctx: ToolContext): IntelligenceConfig {
@@ -142,6 +143,56 @@ export const graphTool: ToolDef = categoryTool(
         return { hubs: topHubs(g, limit, p.kind as NodeKind | undefined).map(fmtHub) };
       },
     },
+    mermaid: {
+      description:
+        "Render the knowledge graph as a mermaid flowchart: a node's neighborhood (node + depth?) or, with no node, a top-hubs overview. Params: node?, depth?, direction? (LR|TD)",
+      handler: async (ctx, p) => {
+        ctx.project.ensureLoaded();
+        const g = requireGraph(ctx);
+        const node = typeof p.node === "string" ? p.node : "";
+        const direction = p.layout === "TD" ? "TD" : "LR";
+        let nodes;
+        let edges;
+        if (node && g.nodes[node]) {
+          const depth = typeof p.depth === "number" ? Math.min(4, Math.max(1, p.depth)) : 1;
+          const sg = subgraph(g, node, depth);
+          nodes = sg.nodes;
+          edges = sg.edges;
+        } else if (node) {
+          return { error: `Node not found: ${node}`, hint: 'Use graph(action="find") to locate it.' };
+        } else {
+          const hubNodes = topHubs(g, 20).map((h) => h.node);
+          const ids = new Set(hubNodes.map((n) => n.id));
+          nodes = hubNodes;
+          edges = g.edges.filter((e) => ids.has(e.from) && ids.has(e.to));
+        }
+        const result = graphToMermaid(nodes, edges, { direction });
+        return { scope: node || "top-hubs", ...result };
+      },
+    },
+    blueprint: {
+      description:
+        "Render a blueprint's graph (execution flow solid, data flow dotted) as a mermaid diagram. Requires the editor connected. Params: path (/Game/...), graphName? (default EventGraph)",
+      handler: async (ctx, p) => {
+        ctx.project.ensureLoaded();
+        if (!ctx.bridge.isConnected) {
+          return { error: "Editor not connected — blueprint rendering reads the live graph via the bridge." };
+        }
+        const assetPath = String(p.path ?? "");
+        if (!assetPath) throw new Error("graph.blueprint requires a 'path'");
+        const summary = (await ctx.bridge.call("read_blueprint_graph_summary", {
+          path: assetPath,
+          graphName: typeof p.graphName === "string" ? p.graphName : undefined,
+        })) as BlueprintGraphSummary;
+        const result = blueprintSummaryToMermaid(summary);
+        return {
+          path: assetPath,
+          graphName: summary?.graphName,
+          graphType: summary?.graphType,
+          ...result,
+        };
+      },
+    },
     find: {
       description: "Find nodes whose id/label matches a query. Params: query",
       handler: async (ctx, p) => {
@@ -164,6 +215,9 @@ export const graphTool: ToolDef = categoryTool(
     query: z.string().optional().describe("Find-by-name query"),
     includeAssets: z.boolean().optional().describe("Include blueprint dependency edges (default true)"),
     includeCode: z.boolean().optional().describe("Include C++ include edges (default true)"),
+    layout: z.enum(["LR", "TD"]).optional().describe("mermaid layout direction (default LR)"),
+    path: z.string().optional().describe("Blueprint asset path for graph(blueprint) rendering"),
+    graphName: z.string().optional().describe("Blueprint graph name (default EventGraph)"),
   },
 );
 
