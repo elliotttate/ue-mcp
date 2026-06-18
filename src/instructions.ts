@@ -188,9 +188,10 @@ a built-in hashing embedding works offline; configure a real embedding model in
 ue-mcp.yml under ue-mcp.intelligence.embedding to upgrade).
 
   index    — build/maintain the semantic index of code, config, docs, blueprint summaries
-             index(action="build")   then  index(action="status")  /  index(action="ingest", path=...)
+             index(action="build") · index(action="status") · index(action="summary") · index(action="ingest", path=...)
   search   — retrieve relevant chunks with file/line provenance
              search(action="hybrid", query="...")   (also: semantic, code_examples, references)
+             search(action="grep", query="...", regex=true)   — exact filesystem search, no index needed
   graph    — project knowledge graph: dependencies, hubs, paths
              graph(action="build")  then  graph(action="project_map") / hubs / neighbors / path
   memory   — durable cross-session notes:  memory(action="write"|"append"|"read"|"list")

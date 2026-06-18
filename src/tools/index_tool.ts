@@ -7,6 +7,7 @@
 import { z } from "zod";
 import { categoryTool, type ToolDef } from "../types.js";
 import { Indexer, indexStatus } from "../intelligence/indexer.js";
+import { generateProjectSummary } from "../intelligence/summary.js";
 import { indexIgnorePath } from "../intelligence/paths.js";
 import * as fs from "node:fs";
 
@@ -55,6 +56,18 @@ export const indexTool: ToolDef = categoryTool(
       handler: async (ctx) => {
         ctx.project.ensureLoaded();
         return indexStatus(ctx.project.projectDir!);
+      },
+    },
+    summary: {
+      description:
+        "Project overview: a structural digest (counts by kind/language, top directories, dependency hubs, README excerpt). Narrates to prose if a summarizer is configured, otherwise returns the digest for the agent to narrate.",
+      handler: async (ctx) => {
+        ctx.project.ensureLoaded();
+        return generateProjectSummary(
+          ctx.project.projectDir!,
+          ctx.project.projectName,
+          (ctx.project.config.intelligence ?? {}) as import("../intelligence/config.js").IntelligenceConfig,
+        );
       },
     },
     clear: {

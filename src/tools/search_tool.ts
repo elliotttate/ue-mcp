@@ -8,6 +8,7 @@ import { z } from "zod";
 import { categoryTool, type ToolDef, type ToolContext } from "../types.js";
 import { loadIndex } from "../intelligence/indexer.js";
 import { searchIndex, type SearchMode } from "../intelligence/search.js";
+import { grepProject } from "../intelligence/grep.js";
 import type { IntelligenceConfig } from "../intelligence/config.js";
 import type { ChunkKind } from "../intelligence/types.js";
 
@@ -42,6 +43,24 @@ export const searchTool: ToolDef = categoryTool(
         "Find where a symbol/identifier appears across the codebase (lexical-first). Params: query (the symbol), k?",
       handler: async (ctx, p) => runSearch(ctx, p, "lexical", "code"),
     },
+    grep: {
+      description:
+        "Literal/regex filesystem search over project text files. No index required. Params: query, regex?, ignoreCase?, ext? (e.g. [\".cpp\",\".h\"]), sourcePrefix?, maxResults?",
+      handler: async (ctx, p) => {
+        ctx.project.ensureLoaded();
+        const query = String(p.query ?? "").trim();
+        if (!query) throw new Error("search.grep requires a 'query'");
+        return grepProject(ctx.project.projectDir!, {
+          query,
+          regex: p.regex === true,
+          ignoreCase: p.ignoreCase === true,
+          ext: Array.isArray(p.ext) ? (p.ext as string[]) : undefined,
+          sourcePrefix: typeof p.sourcePrefix === "string" ? p.sourcePrefix : undefined,
+          maxResults: typeof p.maxResults === "number" ? p.maxResults : undefined,
+          ignore: cfgOf(ctx).ignore ?? [],
+        });
+      },
+    },
   },
   undefined,
   {
@@ -52,6 +71,10 @@ export const searchTool: ToolDef = categoryTool(
       .optional()
       .describe("Restrict to a chunk kind"),
     sourcePrefix: z.string().optional().describe("Restrict to sources starting with this string"),
+    regex: z.boolean().optional().describe("grep: treat query as a regular expression"),
+    ignoreCase: z.boolean().optional().describe("grep: case-insensitive match"),
+    ext: z.array(z.string()).optional().describe("grep: restrict to file extensions"),
+    maxResults: z.number().int().min(1).max(1000).optional().describe("grep: cap on matches (default 200)"),
   },
 );
 
