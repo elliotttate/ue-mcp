@@ -47,7 +47,7 @@ class MockBridge implements IBridge {
         summaries: paths.map((p) => ({
           path: p,
           summary: `Blueprint ${p} parent ACharacter`,
-          dependencies: ["/Game/Core/BP_GameMode"],
+          dependencies: ["/Game/Core/BP_GameMode", "Editor is still initializing. Please wait and retry."],
           name: p.split("/").pop(),
         })),
       };
@@ -55,7 +55,7 @@ class MockBridge implements IBridge {
     if (method === "extract_index_summary") {
       return {
         summary: "Blueprint BP_Player parent ACharacter variables Health Stamina",
-        dependencies: ["/Game/Core/BP_GameMode"],
+        dependencies: ["/Game/Core/BP_GameMode", "Editor is still initializing. Please wait and retry."],
         name: "BP_Player",
       };
     }
@@ -308,6 +308,8 @@ describe("knowledge graph from cached manifest deps", () => {
       const g = loadGraph(dir)!;
       const edge = g.edges.find((e) => e.from === "/Game/BP_Player" && e.to.includes("BP_GameMode"));
       expect(edge).toBeTruthy();
+      // Non-asset strings (e.g. transient bridge messages) must never become nodes.
+      expect(Object.keys(g.nodes).some((id) => id.toLowerCase().includes("initializing"))).toBe(false);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

@@ -38,6 +38,12 @@ function collectStrings(value: unknown, out: string[], depth = 0): void {
   }
 }
 
+/** Keep only strings that look like asset/package references (contain a slash),
+ *  so transient bridge messages can never leak into the dependency graph. */
+function assetRefs(strings: string[]): string[] {
+  return strings.filter((s) => s.includes("/"));
+}
+
 async function tryCall(
   bridge: IBridge,
   method: string,
@@ -65,7 +71,7 @@ export async function extractBlueprintSummary(
     if (text) {
       const deps: string[] = [];
       collectStrings(d.dependencies ?? [], deps);
-      return { text, dependencies: deps, symbol: typeof d.name === "string" ? d.name : undefined };
+      return { text, dependencies: assetRefs(deps), symbol: typeof d.name === "string" ? d.name : undefined };
     }
   }
 
@@ -77,11 +83,10 @@ export async function extractBlueprintSummary(
 
   const parts: string[] = [`Blueprint asset: ${gamePath}`];
   if (summary) parts.push(compact(summary));
-  const depNames: string[] = [];
-  if (deps) {
-    collectStrings(deps, depNames);
-    if (depNames.length) parts.push("Dependencies: " + depNames.slice(0, 60).join(", "));
-  }
+  const collected: string[] = [];
+  if (deps) collectStrings(deps, collected);
+  const depNames = assetRefs(collected);
+  if (depNames.length) parts.push("Dependencies: " + depNames.slice(0, 60).join(", "));
   const text = parts.join("\n").slice(0, 6000);
   const name = gamePath.split("/").pop();
   return { text, dependencies: depNames, symbol: name };
@@ -96,7 +101,9 @@ export async function extractBlueprintSummary(
 export async function extractBlueprintSummaries(
   bridge: IBridge,
   gamePaths: string[],
-  batchSize = 200,
+  // Small batches keep each call a short game-thread task; large batches exceed
+  // the editor's per-call execution window and drop the bridge connection.
+  batchSize = 25,
 ): Promise<Map<string, BlueprintSummary>> {
   const out = new Map<string, BlueprintSummary>();
   if (!bridge.isConnected || gamePaths.length === 0) return out;
@@ -125,7 +132,7 @@ export async function extractBlueprintSummaries(
       if (o.path && text) {
         const deps: string[] = [];
         collectStrings(o.dependencies ?? [], deps);
-        out.set(o.path, { text, dependencies: deps, symbol: typeof o.name === "string" ? o.name : undefined });
+        out.set(o.path, { text, dependencies: assetRefs(deps), symbol: typeof o.name === "string" ? o.name : undefined });
       }
     }
   }
