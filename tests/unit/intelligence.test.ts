@@ -13,8 +13,32 @@ import { walkProject } from "../../src/intelligence/walker.js";
 import { searchIndex } from "../../src/intelligence/search.js";
 import { computeScores, shortestPath, neighbors, topHubs, subgraph, type KnowledgeGraph } from "../../src/intelligence/knowledge-graph.js";
 import { Indexer, loadIndex, indexStatus } from "../../src/intelligence/indexer.js";
+import { toGamePath } from "../../src/intelligence/bp-extract.js";
+import { grepProject } from "../../src/intelligence/grep.js";
+import { buildProjectDigest } from "../../src/intelligence/summary.js";
 import type { IBridge } from "../../src/bridge.js";
 import type { VectorEntry } from "../../src/intelligence/types.js";
+
+/** A bridge whose connection can be toggled, answering extract_index_summary. */
+class MockBridge implements IBridge {
+  connected = true;
+  get isConnected() {
+    return this.connected;
+  }
+  async connect() {
+    /* no-op */
+  }
+  async call(method: string) {
+    if (method === "extract_index_summary") {
+      return {
+        summary: "Blueprint BP_Player parent ACharacter variables Health Stamina",
+        dependencies: ["/Game/Core/BP_GameMode"],
+        name: "BP_Player",
+      };
+    }
+    throw new Error(`unsupported ${method}`);
+  }
+}
 
 const offlineBridge: IBridge = {
   isConnected: false,
@@ -219,5 +243,69 @@ describe("Indexer end-to-end (offline)", () => {
 
     indexer.clear();
     expect(indexStatus(dir).built).toBe(false);
+  });
+
+  it("preserves the blueprint index across an offline rebuild", async () => {
+    fs.mkdirSync(path.join(dir, "Content"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "Content", "BP_Player.uasset"), Buffer.from([0, 1, 2, 3, 4]));
+    fs.writeFileSync(path.join(dir, "Source", "Game", "A.cpp"), "int a = 1;");
+
+    const bridge = new MockBridge();
+    const indexer = new Indexer(dir, "Game", bridge, {});
+
+    const s1 = await indexer.build({ includeAssets: true });
+    expect(s1.assetsIndexed).toBe(1);
+    const idx1 = loadIndex(dir, {})!;
+    expect([...idx1.store.sources()].some((s) => s.includes("BP_Player"))).toBe(true);
+
+    // Editor goes away; an incremental rebuild must NOT evict the blueprint index.
+    bridge.connected = false;
+    await indexer.build({ includeAssets: true });
+    const idx2 = loadIndex(dir, {})!;
+    expect([...idx2.store.sources()].some((s) => s.includes("BP_Player"))).toBe(true);
+  });
+});
+
+describe("toGamePath", () => {
+  it("maps project and plugin content to the correct mount", () => {
+    expect(toGamePath("Content/Blueprints/BP_Player.uasset", "Game")).toBe("/Game/Blueprints/BP_Player");
+    expect(toGamePath("Plugins/MyPlugin/Content/Widgets/WBP_HUD.uasset", "Game")).toBe("/MyPlugin/Widgets/WBP_HUD");
+    expect(toGamePath("Content/Maps/Main.umap", "Game")).toBe("/Game/Maps/Main");
+  });
+});
+
+describe("grepProject", () => {
+  it("finds literal and regex matches with provenance", () => {
+    const dir = tmpProject();
+    try {
+      fs.writeFileSync(path.join(dir, "Source", "Game", "Combat.cpp"), "void Fire() {}\nvoid Reload() {}\n");
+      const literal = grepProject(dir, { query: "Reload" });
+      expect(literal.matches.some((m) => m.source.endsWith("Combat.cpp") && m.line === 2)).toBe(true);
+      const rx = grepProject(dir, { query: "void \\w+\\(", regex: true });
+      expect(rx.count).toBe(2);
+      const filtered = grepProject(dir, { query: "Fire", ext: [".md"] });
+      expect(filtered.count).toBe(0); // no .md files match
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("buildProjectDigest", () => {
+  it("summarizes index composition after a build", async () => {
+    const dir = tmpProject();
+    try {
+      fs.writeFileSync(path.join(dir, "Source", "Game", "Player.cpp"), "class APlayer {};");
+      fs.writeFileSync(path.join(dir, "README.md"), "# MyGame\nA tactics game.");
+      await new Indexer(dir, "Game", offlineBridge, {}).build({ includeAssets: false });
+      const digest = buildProjectDigest(dir, "Game");
+      expect(digest.indexed).toBe(true);
+      expect(digest.sources).toBeGreaterThanOrEqual(2);
+      expect(digest.byKind.code).toBeGreaterThanOrEqual(1);
+      expect(digest.readmeExcerpt).toContain("MyGame");
+      expect(digest.approxIndexTokens).toBeGreaterThan(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

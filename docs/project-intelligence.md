@@ -19,8 +19,8 @@ flowchart LR
 
 | Tool | Purpose | Key actions |
 |------|---------|-------------|
-| `index` | Build/maintain the semantic index | `build`, `update`, `status`, `clear`, `ingest`, `ignore_patterns` |
-| `search` | Retrieve relevant chunks with provenance | `hybrid`, `semantic`, `code_examples`, `references` |
+| `index` | Build/maintain the semantic index | `build`, `update`, `status`, `summary`, `clear`, `ingest`, `ignore_patterns` |
+| `search` | Retrieve relevant chunks with provenance | `hybrid`, `semantic`, `code_examples`, `references`, `grep` |
 | `graph` | Project knowledge graph | `build`, `project_map`, `hubs`, `neighbors`, `subgraph`, `path`, `find`, `stats` |
 | `memory` | Durable cross-session notes | `list`, `read`, `write`, `append`, `delete` |
 | `context` | Capture live editor working context | `get`, `capture_selection`, `capture_viewport` |
