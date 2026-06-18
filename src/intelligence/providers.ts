@@ -8,6 +8,7 @@
  * fetch — no SDKs. Keys come from environment variables, never project config.
  */
 import { warn } from "../log.js";
+import { httpFetch } from "./http.js";
 import type { EmbeddingProvider } from "./types.js";
 import type { EmbeddingConfig } from "./config.js";
 import { DEFAULT_KEY_ENV } from "./config.js";
@@ -90,11 +91,15 @@ class HttpEmbedding implements EmbeddingProvider {
   }
 
   private async embedBatch(texts: string[]): Promise<number[][]> {
-    const res = await fetch(this.o.endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...this.o.headers },
-      body: JSON.stringify(this.o.body(texts, this.o.model)),
-    });
+    const res = await httpFetch(
+      this.o.endpoint,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...this.o.headers },
+        body: JSON.stringify(this.o.body(texts, this.o.model)),
+      },
+      { retries: 3, timeoutMs: 60_000 },
+    );
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
       throw new Error(`${this.name} embeddings HTTP ${res.status}: ${detail.slice(0, 300)}`);

@@ -14,6 +14,7 @@ import { manifestPath, vectorStorePath } from "./paths.js";
 import { VectorStore } from "./vector-store.js";
 import { loadGraph, topHubs } from "./knowledge-graph.js";
 import { estimateTokens } from "./tokens.js";
+import { httpFetch } from "./http.js";
 
 export interface ProjectDigest {
   project: string | null;
@@ -107,11 +108,15 @@ async function summarizeWithProvider(sc: SummarizerConfig, digestText: string, e
 
   if (sc.provider === "ollama") {
     const base = (sc.baseUrl ?? "http://localhost:11434").replace(/\/$/, "");
-    const res = await fetch(`${base}/api/chat`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: sc.model ?? "llama3", stream: false, messages: [{ role: "user", content: prompt }] }),
-    });
+    const res = await httpFetch(
+      `${base}/api/chat`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: sc.model ?? "llama3", stream: false, messages: [{ role: "user", content: prompt }] }),
+      },
+      { retries: 2, timeoutMs: 60_000 },
+    );
     if (!res.ok) throw new Error(`Ollama HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
     const json = (await res.json()) as { message?: { content?: string } };
     return json.message?.content?.trim() ?? "";
@@ -122,17 +127,21 @@ async function summarizeWithProvider(sc: SummarizerConfig, digestText: string, e
   const apiKey = env[keyEnv];
   if (!apiKey) throw new Error(`Summarizer provider '${sc.provider}' requires ${keyEnv}.`);
   const base = (sc.baseUrl ?? "https://api.openai.com/v1").replace(/\/$/, "");
-  const res = await fetch(`${base}/chat/completions`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model: sc.model ?? "gpt-4o-mini",
-      messages: [
-        { role: "system", content: "You summarize Unreal Engine projects concisely and accurately." },
-        { role: "user", content: prompt },
-      ],
-    }),
-  });
+  const res = await httpFetch(
+    `${base}/chat/completions`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: sc.model ?? "gpt-4o-mini",
+        messages: [
+          { role: "system", content: "You summarize Unreal Engine projects concisely and accurately." },
+          { role: "user", content: prompt },
+        ],
+      }),
+    },
+    { retries: 2, timeoutMs: 60_000 },
+  );
   if (!res.ok) throw new Error(`Summarizer HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
   return json.choices?.[0]?.message?.content?.trim() ?? "";

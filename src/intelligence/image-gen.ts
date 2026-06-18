@@ -9,7 +9,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ImageConfig } from "./config.js";
 import { DEFAULT_KEY_ENV } from "./config.js";
+import { httpFetch } from "./http.js";
 import { fnv1a } from "./text.js";
+
+const GEN_TIMEOUT_MS = 120_000;
 import { generatedImageDir, ensureDir } from "./paths.js";
 
 export interface ImageGenResult {
@@ -49,18 +52,22 @@ export async function generateImage(
     const base = (cfg.baseUrl ?? "https://api.openai.com/v1").replace(/\/$/, "");
     const body: Record<string, unknown> = { model, prompt, size, n: 1 };
     if (model.startsWith("dall-e")) body.response_format = "b64_json";
-    const res = await fetch(`${base}/images/generations`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify(body),
-    });
+    const res = await httpFetch(
+      `${base}/images/generations`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify(body),
+      },
+      { timeoutMs: GEN_TIMEOUT_MS },
+    );
     if (!res.ok) throw new Error(`OpenAI images HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
     const json = (await res.json()) as { data?: Array<{ b64_json?: string; url?: string }> };
     const item = json.data?.[0];
     const buf = item?.b64_json
       ? Buffer.from(item.b64_json, "base64")
       : item?.url
-        ? Buffer.from(await (await fetch(item.url)).arrayBuffer())
+        ? Buffer.from(await (await httpFetch(item.url, {}, { retries: 2 })).arrayBuffer())
         : null;
     if (!buf) throw new Error("OpenAI returned no image data.");
     fs.writeFileSync(file, buf);
@@ -75,11 +82,15 @@ export async function generateImage(
     const form = new FormData();
     form.append("prompt", prompt);
     form.append("output_format", "png");
-    const res = await fetch(`${base}/${model}`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${apiKey}`, accept: "image/*" },
-      body: form,
-    });
+    const res = await httpFetch(
+      `${base}/${model}`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, accept: "image/*" },
+        body: form,
+      },
+      { timeoutMs: GEN_TIMEOUT_MS },
+    );
     if (!res.ok) throw new Error(`Stability HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
     const buf = Buffer.from(await res.arrayBuffer());
     fs.writeFileSync(file, buf);
@@ -99,11 +110,15 @@ export async function generateImage(
 }
 
 async function replicateGenerate(model: string, prompt: string, apiKey: string): Promise<Buffer> {
-  const start = await fetch(`https://api.replicate.com/v1/models/${model}/predictions`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}`, Prefer: "wait" },
-    body: JSON.stringify({ input: { prompt } }),
-  });
+  const start = await httpFetch(
+    `https://api.replicate.com/v1/models/${model}/predictions`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}`, Prefer: "wait" },
+      body: JSON.stringify({ input: { prompt } }),
+    },
+    { timeoutMs: GEN_TIMEOUT_MS },
+  );
   if (!start.ok) throw new Error(`Replicate HTTP ${start.status}: ${(await start.text()).slice(0, 300)}`);
   let pred = (await start.json()) as { status?: string; output?: unknown; urls?: { get?: string } };
 
@@ -113,14 +128,15 @@ async function replicateGenerate(model: string, prompt: string, apiKey: string):
     await new Promise((r) => setTimeout(r, 1500));
     const getUrl = pred.urls?.get;
     if (!getUrl) break;
-    pred = (await (await fetch(getUrl, { headers: { authorization: `Bearer ${apiKey}` } })).json()) as typeof pred;
+    const poll = await httpFetch(getUrl, { headers: { authorization: `Bearer ${apiKey}` } }, { timeoutMs: 30_000 });
+    pred = (await poll.json()) as typeof pred;
     tries++;
   }
   if (pred.status === "failed") throw new Error("Replicate prediction failed.");
   const out = pred.output;
   const url = Array.isArray(out) ? (out[0] as string) : typeof out === "string" ? out : null;
   if (!url) throw new Error("Replicate returned no output URL.");
-  return Buffer.from(await (await fetch(url)).arrayBuffer());
+  return Buffer.from(await (await httpFetch(url, {}, { retries: 2 })).arrayBuffer());
 }
 
 export function listGeneratedImages(projectDir: string): Array<{ file: string; bytes: number }> {
