@@ -34,6 +34,7 @@
 #include "Handlers/PhysicsHandlers.h"
 #include "Handlers/DemoHandlers.h"
 #include "Handlers/StateTreeHandlers.h"
+#include "Handlers/ProjectIntelligenceHandlers.h"
 
 // Platform-specific socket includes
 #if PLATFORM_WINDOWS
@@ -90,6 +91,8 @@ FMCPBridgeServer::FMCPBridgeServer(int32 Port)
 	FDemoHandlers::RegisterHandlers(HandlerRegistry);
 	FProjectHandlers::RegisterHandlers(HandlerRegistry);
 	FStateTreeHandlers::RegisterHandlers(HandlerRegistry);
+	// Optional fast paths for the server-side Project Intelligence layer.
+	FProjectIntelligenceHandlers::RegisterHandlers(HandlerRegistry);
 }
 
 FMCPBridgeServer::~FMCPBridgeServer()
