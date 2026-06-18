@@ -89,6 +89,19 @@ export const graphTool: ToolDef = categoryTool(
         };
       },
     },
+    dependents: {
+      description: "What depends on a node (reverse dependencies / subclasses / includers). Params: node (id)",
+      handler: async (ctx, p) => {
+        ctx.project.ensureLoaded();
+        const g = requireGraph(ctx);
+        const node = String(p.node ?? "");
+        if (!g.nodes[node]) return { error: `Node not found: ${node}`, hint: 'Use graph(action="find") to locate it.' };
+        return {
+          node,
+          dependents: neighbors(g, node, "in").map((n) => ({ id: n.node.id, kind: n.node.kind, edge: n.edge.type })),
+        };
+      },
+    },
     subgraph: {
       description: "k-hop neighborhood around a node. Params: node (id), depth? (default 1)",
       handler: async (ctx, p) => {
