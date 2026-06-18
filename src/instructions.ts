@@ -182,6 +182,27 @@ DO suggest a new flow IF AND ONLY IF all three are true:
 In that case say: "This sequence (X -> Y -> Z) might be worth registering
 as a flow in ue-mcp.yml. Want me to draft one?" Then STOP. Wait.
 
+═══ PROJECT INTELLIGENCE ═══
+A local, model-agnostic layer for understanding a project (no cloud, no extra setup —
+a built-in hashing embedding works offline; configure a real embedding model in
+ue-mcp.yml under ue-mcp.intelligence.embedding to upgrade).
+
+  index    — build/maintain the semantic index of code, config, docs, blueprint summaries
+             index(action="build")   then  index(action="status")  /  index(action="ingest", path=...)
+  search   — retrieve relevant chunks with file/line provenance
+             search(action="hybrid", query="...")   (also: semantic, code_examples, references)
+  graph    — project knowledge graph: dependencies, hubs, paths
+             graph(action="build")  then  graph(action="project_map") / hubs / neighbors / path
+  memory   — durable cross-session notes:  memory(action="write"|"append"|"read"|"list")
+  context  — capture live editor selection/viewport:  context(action="get")
+  validate — check identifiers/code/blueprint plans vs live reflection (catches hallucinations)
+             validate(action="unreal_code", code="...")
+  image    — generate textures from prompts and import them:  image(action="generate_and_import", ...)
+
+WHEN TO USE: To answer "how does this project fit together / where is X / what depends on Y",
+run index+graph first, then search/graph — this is far better than blind file reading. Blueprint
+summaries and dependency edges need the editor connected; code/docs index works offline.
+
 ═══ FEEDBACK ═══
 If you had to use editor(action="execute_python") as a workaround because a native tool
 couldn't handle the task, keep a mental note of what you did and why. When your task is

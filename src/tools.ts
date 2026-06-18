@@ -28,6 +28,16 @@ import { demoTool } from "./tools/demo.js";
 import { feedbackTool } from "./tools/feedback.js";
 import { statetreeTool } from "./tools/statetree.js";
 import { pluginsTool } from "./tools/plugins.js";
+// Project Intelligence layer (indexing / retrieval / graph / memory / context /
+// image / validation). These are local-handler tools: they run in the server
+// process and use the editor bridge only to extract data.
+import { indexTool } from "./tools/index_tool.js";
+import { searchTool } from "./tools/search_tool.js";
+import { graphTool } from "./tools/graph_tool.js";
+import { memoryTool } from "./tools/memory_tool.js";
+import { contextTool } from "./tools/context_tool.js";
+import { imageTool } from "./tools/image_tool.js";
+import { validateTool } from "./tools/validate_tool.js";
 
 export const ALL_TOOLS: ToolDef[] = [
   projectTool,
@@ -51,6 +61,13 @@ export const ALL_TOOLS: ToolDef[] = [
   feedbackTool,
   statetreeTool,
   pluginsTool,
+  indexTool,
+  searchTool,
+  graphTool,
+  memoryTool,
+  contextTool,
+  imageTool,
+  validateTool,
 ];
 
 /** Flatten to (toolName, actionName, bridgeMethod) triples for every action
