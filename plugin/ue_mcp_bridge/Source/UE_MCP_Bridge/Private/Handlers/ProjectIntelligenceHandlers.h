@@ -23,5 +23,9 @@ public:
 
 private:
 	static TSharedPtr<FJsonValue> ExtractIndexSummary(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ExtractIndexSummaries(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetEditorContextBundle(const TSharedPtr<FJsonObject>& Params);
+
+	/** Build a compact summary object for one asset path, or null if not found. */
+	static TSharedPtr<FJsonObject> BuildAssetSummary(const FString& Path);
 };

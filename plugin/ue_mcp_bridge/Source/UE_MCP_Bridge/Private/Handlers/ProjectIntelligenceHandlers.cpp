@@ -38,17 +38,12 @@ namespace
 void FProjectIntelligenceHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 {
 	Registry.RegisterHandler(TEXT("extract_index_summary"), &ExtractIndexSummary);
+	Registry.RegisterHandler(TEXT("extract_index_summaries"), &ExtractIndexSummaries);
 	Registry.RegisterHandler(TEXT("get_editor_context_bundle"), &GetEditorContextBundle);
 }
 
-TSharedPtr<FJsonValue> FProjectIntelligenceHandlers::ExtractIndexSummary(const TSharedPtr<FJsonObject>& Params)
+TSharedPtr<FJsonObject> FProjectIntelligenceHandlers::BuildAssetSummary(const FString& Path)
 {
-	FString Path;
-	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("path"), Path) || Path.IsEmpty())
-	{
-		return MakeError(TEXT("Missing 'path'"));
-	}
-
 	// Normalize "/Game/Foo.Foo" or "/Game/Foo" → package name "/Game/Foo".
 	const FString PackageName = FPackageName::ObjectPathToPackageName(Path);
 
@@ -59,7 +54,7 @@ TSharedPtr<FJsonValue> FProjectIntelligenceHandlers::ExtractIndexSummary(const T
 	AssetRegistry.GetAssetsByPackageName(FName(*PackageName), Assets);
 	if (Assets.Num() == 0)
 	{
-		return MakeError(FString::Printf(TEXT("No asset found for package %s"), *PackageName));
+		return nullptr;
 	}
 
 	const FAssetData& Asset = Assets[0];
@@ -113,9 +108,53 @@ TSharedPtr<FJsonValue> FProjectIntelligenceHandlers::ExtractIndexSummary(const T
 	}
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("path"), Path);
 	Result->SetStringField(TEXT("summary"), FString::Join(Lines, TEXT("\n")));
 	Result->SetStringField(TEXT("name"), Asset.AssetName.ToString());
 	Result->SetArrayField(TEXT("dependencies"), DepValues);
+	return Result;
+}
+
+TSharedPtr<FJsonValue> FProjectIntelligenceHandlers::ExtractIndexSummary(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Path;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("path"), Path) || Path.IsEmpty())
+	{
+		return MakeError(TEXT("Missing 'path'"));
+	}
+	TSharedPtr<FJsonObject> Summary = BuildAssetSummary(Path);
+	if (!Summary.IsValid())
+	{
+		return MakeError(FString::Printf(TEXT("No asset found for %s"), *Path));
+	}
+	return MakeShared<FJsonValueObject>(Summary);
+}
+
+TSharedPtr<FJsonValue> FProjectIntelligenceHandlers::ExtractIndexSummaries(const TSharedPtr<FJsonObject>& Params)
+{
+	const TArray<TSharedPtr<FJsonValue>>* Paths = nullptr;
+	if (!Params.IsValid() || !Params->TryGetArrayField(TEXT("paths"), Paths) || Paths == nullptr)
+	{
+		return MakeError(TEXT("Missing 'paths' array"));
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Summaries;
+	for (const TSharedPtr<FJsonValue>& PathValue : *Paths)
+	{
+		FString Path;
+		if (!PathValue.IsValid() || !PathValue->TryGetString(Path) || Path.IsEmpty())
+		{
+			continue;
+		}
+		TSharedPtr<FJsonObject> Summary = BuildAssetSummary(Path);
+		if (Summary.IsValid())
+		{
+			Summaries.Add(MakeShared<FJsonValueObject>(Summary));
+		}
+	}
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetArrayField(TEXT("summaries"), Summaries);
 	return MakeShared<FJsonValueObject>(Result);
 }
 
