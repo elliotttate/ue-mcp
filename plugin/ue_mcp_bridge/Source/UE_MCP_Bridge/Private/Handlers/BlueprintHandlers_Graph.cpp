@@ -622,20 +622,58 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AddNode(const TSharedPtr<FJsonObject>
 	TargetGraph->Modify();
 	TargetGraph->AddNode(NewNode, false, false);
 	NewNode->CreateNewGuid();
-	NewNode->PostPlacedNewNode();
-	NewNode->AllocateDefaultPins();
+
+	// ConstructObjectFromClass-derived nodes (SpawnActorFromClass, ...) read their
+	// OWN pins inside PostPlacedNewNode - e.g. UK2Node_SpawnActorFromClass calls
+	// GetScaleMethodPin() -> FindPinChecked(), which asserts (EdGraphNode.h check)
+	// if the pins do not exist yet. So for these nodes the pins must be allocated
+	// BEFORE PostPlacedNewNode. Every other node keeps the legacy order, where
+	// PostPlacedNewNode may itself be what builds the pins.
+	UK2Node* K2 = Cast<UK2Node>(NewNode);
+	const bool bConstructFromClass = K2 && K2->IsA<UK2Node_ConstructObjectFromClass>();
+	if (bConstructFromClass)
+	{
+		NewNode->AllocateDefaultPins();
+		NewNode->PostPlacedNewNode();
+
+		// Bind the spawn/construct class from nodeParams ("class" or "spawnClass")
+		// so the node comes out fully formed (exposed-on-spawn pins appear) rather
+		// than as a classless stub the caller has to fix up by hand.
+		if (NodeParams)
+		{
+			FString SpawnClassPath;
+			if (!(*NodeParams)->TryGetStringField(TEXT("class"), SpawnClassPath))
+				(*NodeParams)->TryGetStringField(TEXT("spawnClass"), SpawnClassPath);
+			if (!SpawnClassPath.IsEmpty())
+			{
+				UClass* Resolved = LoadClass<UObject>(nullptr, *SpawnClassPath);
+				if (!Resolved) Resolved = LoadObject<UClass>(nullptr, *SpawnClassPath);
+				if (!Resolved) Resolved = FindClassByShortName(SpawnClassPath);
+				if (Resolved)
+				{
+					if (UEdGraphPin* ClassPin = NewNode->FindPin(TEXT("Class"), EGPD_Input))
+					{
+						ClassPin->DefaultObject = Resolved;
+						// Triggers OnClassPinChanged -> regenerates exposed-on-spawn pins.
+						NewNode->PinDefaultValueChanged(ClassPin);
+					}
+				}
+			}
+		}
+	}
+	else
+	{
+		NewNode->PostPlacedNewNode();
+		NewNode->AllocateDefaultPins();
+	}
 
 	// #101/#118: after AllocateDefaultPins, force ReconstructNode so typed output pin
 	// ("As ClassName") appears for DynamicCast and typed pins appear for VariableGet.
-	// Skip ReconstructNode for ConstructObjectFromClass: at this point the Class
-	// pin is unset and ReconstructNode for SpawnActor walks pin defaults that
-	// expect a non-null class, asserting before AutowireNewNode would fix it.
-	if (UK2Node* K2 = Cast<UK2Node>(NewNode))
+	// Skip for ConstructObjectFromClass: handled above, and a classless reconstruct
+	// walks pin defaults that expect a non-null class.
+	if (K2 && !bConstructFromClass)
 	{
-		if (!K2->IsA<UK2Node_ConstructObjectFromClass>())
-		{
-			K2->ReconstructNode();
-		}
+		K2->ReconstructNode();
 	}
 
 	// #152: function graphs need the structural-modification signal for the
