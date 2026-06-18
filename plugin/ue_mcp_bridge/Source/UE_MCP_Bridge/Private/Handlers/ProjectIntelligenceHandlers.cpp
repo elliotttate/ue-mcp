@@ -18,7 +18,7 @@
 
 namespace
 {
-	TSharedPtr<FJsonValue> MakeError(const FString& Message)
+	TSharedPtr<FJsonValue> MakeErrorResult(const FString& Message)
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		Obj->SetStringField(TEXT("error"), Message);
@@ -120,12 +120,12 @@ TSharedPtr<FJsonValue> FProjectIntelligenceHandlers::ExtractIndexSummary(const T
 	FString Path;
 	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("path"), Path) || Path.IsEmpty())
 	{
-		return MakeError(TEXT("Missing 'path'"));
+		return MakeErrorResult(TEXT("Missing 'path'"));
 	}
 	TSharedPtr<FJsonObject> Summary = BuildAssetSummary(Path);
 	if (!Summary.IsValid())
 	{
-		return MakeError(FString::Printf(TEXT("No asset found for %s"), *Path));
+		return MakeErrorResult(FString::Printf(TEXT("No asset found for %s"), *Path));
 	}
 	return MakeShared<FJsonValueObject>(Summary);
 }
@@ -135,7 +135,7 @@ TSharedPtr<FJsonValue> FProjectIntelligenceHandlers::ExtractIndexSummaries(const
 	const TArray<TSharedPtr<FJsonValue>>* Paths = nullptr;
 	if (!Params.IsValid() || !Params->TryGetArrayField(TEXT("paths"), Paths) || Paths == nullptr)
 	{
-		return MakeError(TEXT("Missing 'paths' array"));
+		return MakeErrorResult(TEXT("Missing 'paths' array"));
 	}
 
 	TArray<TSharedPtr<FJsonValue>> Summaries;
@@ -210,6 +210,6 @@ TSharedPtr<FJsonValue> FProjectIntelligenceHandlers::GetEditorContextBundle(cons
 
 	return MakeShared<FJsonValueObject>(Result);
 #else
-	return MakeError(TEXT("get_editor_context_bundle requires the editor"));
+	return MakeErrorResult(TEXT("get_editor_context_bundle requires the editor"));
 #endif
 }
