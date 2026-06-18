@@ -42,9 +42,10 @@ async function tryCall(
   bridge: IBridge,
   method: string,
   params: Record<string, unknown>,
+  timeoutMs = 20_000,
 ): Promise<unknown | null> {
   try {
-    return await bridge.call(method, params, 20_000);
+    return await bridge.call(method, params, timeoutMs);
   } catch {
     return null;
   }
@@ -103,7 +104,9 @@ export async function extractBlueprintSummaries(
   let batchSupported = true;
   for (let i = 0; i < gamePaths.length && batchSupported; i += batchSize) {
     const slice = gamePaths.slice(i, i + batchSize);
-    const res = await tryCall(bridge, "extract_index_summaries", { paths: slice });
+    // Generous timeout: the first batch after a fresh editor boot may trigger a
+    // synchronous asset-registry scan on the C++ side.
+    const res = await tryCall(bridge, "extract_index_summaries", { paths: slice }, 120_000);
     if (!res || typeof res !== "object") {
       batchSupported = false;
       break;

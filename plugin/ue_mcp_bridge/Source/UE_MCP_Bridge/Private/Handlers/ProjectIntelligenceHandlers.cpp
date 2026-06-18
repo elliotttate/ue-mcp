@@ -52,6 +52,15 @@ TSharedPtr<FJsonObject> FProjectIntelligenceHandlers::BuildAssetSummary(const FS
 
 	TArray<FAssetData> Assets;
 	AssetRegistry.GetAssetsByPackageName(FName(*PackageName), Assets);
+	if (Assets.Num() == 0 && AssetRegistry.IsLoadingAssets())
+	{
+		// Fresh editor boot: the background asset scan may not have reached this
+		// path yet. Force a targeted synchronous scan of the package's directory
+		// (cheap; siblings in the same folder resolve immediately afterwards) and
+		// retry once, so an index kicked off right after launch still resolves.
+		AssetRegistry.ScanPathsSynchronous({ FPackageName::GetLongPackagePath(PackageName) }, false);
+		AssetRegistry.GetAssetsByPackageName(FName(*PackageName), Assets);
+	}
 	if (Assets.Num() == 0)
 	{
 		return nullptr;
