@@ -44,7 +44,9 @@ export const IntelligenceConfigSchema = z
     image: ProviderRefSchema.optional(),
     summarizer: ProviderRefSchema.optional(),
     ignore: z.array(z.string()).optional(),
+    respectGitignore: z.boolean().optional(),
     maxFileSize: z.number().int().min(1).optional(),
+    watch: z.boolean().optional(),
   })
   .passthrough();
 

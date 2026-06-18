@@ -46,8 +46,12 @@ export interface IntelligenceConfig {
   summarizer?: SummarizerConfig;
   /** Extra ignore globs for indexing, merged with the built-in UE excludes. */
   ignore?: string[];
+  /** Also honor the project's .gitignore when indexing (default false). */
+  respectGitignore?: boolean;
   /** Max file size (bytes) to index. Default 1 MiB. */
   maxFileSize?: number;
+  /** Watch the project and incrementally re-index on change (default false). */
+  watch?: boolean;
 }
 
 /** Default env var names for each API provider's key. */

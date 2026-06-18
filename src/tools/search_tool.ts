@@ -58,6 +58,7 @@ export const searchTool: ToolDef = categoryTool(
           sourcePrefix: typeof p.sourcePrefix === "string" ? p.sourcePrefix : undefined,
           maxResults: typeof p.maxResults === "number" ? p.maxResults : undefined,
           ignore: cfgOf(ctx).ignore ?? [],
+          respectGitignore: cfgOf(ctx).respectGitignore,
         });
       },
     },
@@ -71,6 +72,7 @@ export const searchTool: ToolDef = categoryTool(
       .optional()
       .describe("Restrict to a chunk kind"),
     sourcePrefix: z.string().optional().describe("Restrict to sources starting with this string"),
+    maxTokens: z.number().int().min(50).optional().describe("Trim results to fit this total snippet token budget"),
     regex: z.boolean().optional().describe("grep: treat query as a regular expression"),
     ignoreCase: z.boolean().optional().describe("grep: case-insensitive match"),
     ext: z.array(z.string()).optional().describe("grep: restrict to file extensions"),
@@ -97,6 +99,8 @@ async function runSearch(
     kind: forceKind ?? (p.kind as ChunkKind | "all" | undefined),
     sourcePrefix: typeof p.sourcePrefix === "string" ? p.sourcePrefix : undefined,
     snippetChars,
+    lexical: mode === "semantic" ? undefined : idx.getLexical(),
+    maxTokens: typeof p.maxTokens === "number" ? p.maxTokens : undefined,
   });
   return { query, mode, provider: idx.store.provider, count: hits.length, hits };
 }

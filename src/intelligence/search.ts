@@ -7,7 +7,9 @@
  */
 import type { EmbeddingProvider, SearchHit, VectorEntry, ChunkKind } from "./types.js";
 import type { VectorStore } from "./vector-store.js";
+import type { LexicalIndex } from "./lexical.js";
 import { tokenize } from "./text.js";
+import { estimateTokens } from "./tokens.js";
 
 export type SearchMode = "semantic" | "hybrid" | "lexical";
 
@@ -21,6 +23,10 @@ export interface SearchOptions {
   sourcePrefix?: string;
   /** Max chars of chunk text returned per hit. */
   snippetChars?: number;
+  /** Postings index for fast lexical candidate gathering (optional). */
+  lexical?: LexicalIndex;
+  /** Trim results so the total snippet token estimate stays under this budget. */
+  maxTokens?: number;
 }
 
 const SEM_WEIGHT = 0.65;
@@ -84,7 +90,10 @@ export async function searchIndex(
   }
 
   if (mode !== "semantic") {
-    for (const entry of store.values()) {
+    // Use the postings index to scan only entries that contain a query token;
+    // fall back to a full scan when no index was supplied.
+    const candidates = opts.lexical ? opts.lexical.candidates(qTokens) : store.values();
+    for (const entry of candidates) {
       if (filter && !filter(entry)) continue;
       const lex = lexicalScore(qTokens, entry.meta.text.toLowerCase(), entry.meta.symbol, phrase);
       if (lex <= 0) continue;
@@ -106,5 +115,17 @@ export async function searchIndex(
   });
 
   scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, k).map(({ entry, score }) => toHit(entry, score, snippetChars));
+  const top = scored.slice(0, k).map(({ entry, score }) => toHit(entry, score, snippetChars));
+
+  if (!opts.maxTokens) return top;
+  // Token-budget the response: keep at least one hit, then add while under budget.
+  const budgeted: SearchHit[] = [];
+  let used = 0;
+  for (const hit of top) {
+    const cost = estimateTokens(hit.snippet);
+    if (budgeted.length > 0 && used + cost > opts.maxTokens) break;
+    used += cost;
+    budgeted.push(hit);
+  }
+  return budgeted;
 }

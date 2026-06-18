@@ -94,8 +94,21 @@ function compileIgnore(pattern: string): IgnoreRule | null {
   return { re: new RegExp(`${prefix}${re}(/.*)?$`), dirOnly };
 }
 
-export function loadIgnoreRules(projectDir: string, extra: string[] = []): IgnoreRule[] {
+export function loadIgnoreRules(projectDir: string, extra: string[] = [], respectGitignore = false): IgnoreRule[] {
   const patterns = [...extra];
+  // Project .gitignore (opt-in). Negation (`!`) lines are unsupported and skipped.
+  if (respectGitignore) {
+    const gitignore = path.join(projectDir, ".gitignore");
+    if (fs.existsSync(gitignore)) {
+      try {
+        for (const line of fs.readFileSync(gitignore, "utf-8").split(/\r?\n/)) {
+          if (!line.trim().startsWith("!")) patterns.push(line);
+        }
+      } catch {
+        /* ignore unreadable .gitignore */
+      }
+    }
+  }
   const ignoreFile = indexIgnorePath(projectDir);
   if (fs.existsSync(ignoreFile)) {
     try {
@@ -125,6 +138,8 @@ export interface WalkOptions {
   includeAssets: boolean;
   maxFileSize: number;
   ignore: string[];
+  /** Also honor the project's .gitignore (opt-in). */
+  respectGitignore?: boolean;
   /** Optional extra root directories (e.g. plugin Content dirs). */
   extraRoots?: string[];
 }
@@ -135,7 +150,7 @@ export interface WalkOptions {
  * single recursive walk from projectDir covers the common case.
  */
 export function walkProject(projectDir: string, opts: WalkOptions): FileRecord[] {
-  const rules = loadIgnoreRules(projectDir, opts.ignore);
+  const rules = loadIgnoreRules(projectDir, opts.ignore, opts.respectGitignore);
   const out: FileRecord[] = [];
   const roots = [projectDir, ...(opts.extraRoots ?? [])];
   const seen = new Set<string>();

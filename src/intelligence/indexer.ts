@@ -18,7 +18,7 @@ import { createEmbeddingProvider } from "./providers.js";
 import { VectorStore } from "./vector-store.js";
 import { walkProject, type FileRecord } from "./walker.js";
 import { chunkText, chunkBlob } from "./chunker.js";
-import { extractBlueprintSummary, toGamePath } from "./bp-extract.js";
+import { extractBlueprintSummaries, toGamePath } from "./bp-extract.js";
 import { parseDocumentToMarkdown, collectDocuments } from "./documents.js";
 import {
   loadManifest,
@@ -32,9 +32,11 @@ import {
 } from "./manifest.js";
 import { manifestPath, vectorStorePath, indexDir, ensureDir } from "./paths.js";
 import { withProjectLock } from "./locks.js";
+import { LexicalIndex } from "./lexical.js";
 
 const DEFAULT_MAX_FILE_SIZE = 1024 * 1024; // 1 MiB
 const EMBED_GROUP = 256;
+const CHECKPOINT_GROUPS = 8; // persist the store roughly every ~2000 chunks
 
 export interface IndexBuildOptions {
   rebuild?: boolean;
@@ -241,6 +243,7 @@ export class Indexer {
       includeAssets,
       maxFileSize,
       ignore: this.cfg.ignore ?? [],
+      respectGitignore: this.cfg.respectGitignore,
     });
     const diff = diffManifest(activeManifest, files, fullRebuild);
     log(`${diff.added.length} added, ${diff.changed.length} changed, ${diff.removed.length} removed`);
@@ -261,18 +264,27 @@ export class Indexer {
     // NB: changed sources are evicted later, only once their replacement chunks
     // exist, so a transient extraction failure can never drop an asset.
 
+    // Pre-extract all blueprint summaries in one batched pass (few editor
+    // round-trips instead of one per asset).
+    const toIndex = [...diff.added, ...diff.changed];
+    const bpPaths = toIndex
+      .filter((r) => r.kind === "blueprint")
+      .map((r) => toGamePath(r.relPath, this.projectName));
+    if (bpPaths.length > 0) log(`extracting ${bpPaths.length} blueprint summaries`);
+    const bpSummaries = await extractBlueprintSummaries(this.bridge, bpPaths);
+
     // Build chunks for everything new or changed.
     const pending: PendingSource[] = [];
     const allChunks: Chunk[] = [];
     let skippedAssets = 0;
     let assetsIndexed = 0;
 
-    for (const rec of [...diff.added, ...diff.changed]) {
+    for (const rec of toIndex) {
       let chunks: Chunk[] = [];
       let dependencies: string[] | undefined;
       if (rec.kind === "blueprint") {
         const gamePath = toGamePath(rec.relPath, this.projectName);
-        const summary = await extractBlueprintSummary(this.bridge, gamePath);
+        const summary = bpSummaries.get(gamePath);
         if (!summary) {
           skippedAssets++;
           continue; // not recorded → retried on a later build when bridge is up
@@ -299,32 +311,39 @@ export class Indexer {
       }
     }
 
-    // Embed in groups for bounded memory + progress.
+    // Embed in groups, upserting and periodically checkpointing the store so a
+    // mid-build failure on a long (API-embedded) run keeps the work done so far.
     if (allChunks.length > 0) {
       log(`embedding ${allChunks.length} chunks via ${providerKey}`);
-      const vectors: Float32Array[] = [];
+      let processed = 0;
+      let groupsSinceCheckpoint = 0;
       for (let i = 0; i < allChunks.length; i += EMBED_GROUP) {
         const group = allChunks.slice(i, i + EMBED_GROUP);
         const vs = await provider.embed(group.map((c) => c.text));
-        vectors.push(...vs);
-        log(`embedded ${Math.min(i + EMBED_GROUP, allChunks.length)}/${allChunks.length}`);
+        if (!store) store = new VectorStore(vs[0].length, providerKey);
+        store.upsert(
+          group.map((c, j) => ({
+            id: c.id,
+            vector: vs[j],
+            meta: {
+              id: c.id,
+              source: c.source,
+              kind: c.kind,
+              startLine: c.startLine,
+              endLine: c.endLine,
+              symbol: c.symbol,
+              language: c.language,
+              text: c.text,
+            },
+          })),
+        );
+        processed += group.length;
+        log(`embedded ${processed}/${allChunks.length}`);
+        if (++groupsSinceCheckpoint >= CHECKPOINT_GROUPS) {
+          store.save(vectorStorePath(this.projectDir));
+          groupsSinceCheckpoint = 0;
+        }
       }
-      if (!store) store = new VectorStore(vectors[0].length, providerKey);
-      const entries: VectorEntry[] = allChunks.map((c, idx) => ({
-        id: c.id,
-        vector: vectors[idx],
-        meta: {
-          id: c.id,
-          source: c.source,
-          kind: c.kind,
-          startLine: c.startLine,
-          endLine: c.endLine,
-          symbol: c.symbol,
-          language: c.language,
-          text: c.text,
-        },
-      }));
-      store.upsert(entries);
     }
 
     // Record manifest entries for everything we indexed this pass.
@@ -359,15 +378,53 @@ export class Indexer {
   }
 }
 
+interface CachedIndex {
+  mtime: number;
+  store: VectorStore;
+  lexical: LexicalIndex | null;
+}
+
+/** In-process cache of the loaded store + lexical index, invalidated when the
+ *  vectors file's mtime changes (i.e. after a rebuild). Keeps repeated searches
+ *  from re-reading and re-tokenizing the whole store. */
+const indexCache = new Map<string, CachedIndex>();
+
+export interface LoadedIndex {
+  store: VectorStore;
+  provider: ReturnType<typeof createEmbeddingProvider>;
+  /** Lazily-built, cached lexical postings index for the loaded store. */
+  getLexical: () => LexicalIndex;
+}
+
 /** Load an existing index for querying. Returns null when nothing is built. */
-export function loadIndex(
-  projectDir: string,
-  cfg: IntelligenceConfig,
-): { store: VectorStore; provider: ReturnType<typeof createEmbeddingProvider> } | null {
-  const store = VectorStore.load(vectorStorePath(projectDir));
-  if (!store) return null;
-  const provider = createEmbeddingProvider(cfg.embedding);
-  return { store, provider };
+export function loadIndex(projectDir: string, cfg: IntelligenceConfig): LoadedIndex | null {
+  const file = vectorStorePath(projectDir);
+  let mtime: number;
+  try {
+    mtime = fs.statSync(file).mtimeMs;
+  } catch {
+    indexCache.delete(file);
+    return null;
+  }
+  let cached = indexCache.get(file);
+  if (!cached || cached.mtime !== mtime) {
+    const store = VectorStore.load(file);
+    if (!store) {
+      indexCache.delete(file);
+      return null;
+    }
+    cached = { mtime, store, lexical: null };
+    indexCache.set(file, cached);
+  }
+  const entry = cached;
+  return {
+    store: entry.store,
+    provider: createEmbeddingProvider(cfg.embedding),
+    getLexical: () => {
+      if (!entry.lexical) entry.lexical = new LexicalIndex(entry.store);
+      return entry.lexical;
+    },
+  };
 }
 
 /** Read-only status without touching the editor or rebuilding. */

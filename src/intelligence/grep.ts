@@ -19,6 +19,7 @@ export interface GrepOptions {
   maxResults?: number;
   maxFileSize?: number;
   ignore?: string[];
+  respectGitignore?: boolean;
 }
 
 export interface GrepMatch {
@@ -48,6 +49,7 @@ export function grepProject(
     includeAssets: false,
     maxFileSize: opts.maxFileSize ?? 1024 * 1024,
     ignore: opts.ignore ?? [],
+    respectGitignore: opts.respectGitignore,
   });
   const extSet = opts.ext && opts.ext.length ? new Set(opts.ext.map((e) => e.toLowerCase())) : null;
 

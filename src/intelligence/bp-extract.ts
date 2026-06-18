@@ -86,6 +86,56 @@ export async function extractBlueprintSummary(
   return { text, dependencies: depNames, symbol: name };
 }
 
+/**
+ * Extract many blueprint summaries with as few editor round-trips as possible.
+ * Prefers a dedicated batch handler (extract_index_summaries) in chunks; for
+ * any path the batch does not cover (or if the handler is absent) it falls back
+ * to per-asset extraction. Returns a map keyed by game path.
+ */
+export async function extractBlueprintSummaries(
+  bridge: IBridge,
+  gamePaths: string[],
+  batchSize = 200,
+): Promise<Map<string, BlueprintSummary>> {
+  const out = new Map<string, BlueprintSummary>();
+  if (!bridge.isConnected || gamePaths.length === 0) return out;
+
+  let batchSupported = true;
+  for (let i = 0; i < gamePaths.length && batchSupported; i += batchSize) {
+    const slice = gamePaths.slice(i, i + batchSize);
+    const res = await tryCall(bridge, "extract_index_summaries", { paths: slice });
+    if (!res || typeof res !== "object") {
+      batchSupported = false;
+      break;
+    }
+    const items = Array.isArray(res)
+      ? res
+      : (res as { summaries?: unknown }).summaries;
+    if (!Array.isArray(items)) {
+      batchSupported = false;
+      break;
+    }
+    for (const it of items) {
+      if (!it || typeof it !== "object") continue;
+      const o = it as { path?: string; summary?: string; text?: string; dependencies?: unknown; name?: string };
+      const text = typeof o.summary === "string" ? o.summary : typeof o.text === "string" ? o.text : null;
+      if (o.path && text) {
+        const deps: string[] = [];
+        collectStrings(o.dependencies ?? [], deps);
+        out.set(o.path, { text, dependencies: deps, symbol: typeof o.name === "string" ? o.name : undefined });
+      }
+    }
+  }
+
+  // Per-asset fallback for anything not covered above.
+  for (const gp of gamePaths) {
+    if (out.has(gp)) continue;
+    const s = await extractBlueprintSummary(bridge, gp);
+    if (s) out.set(gp, s);
+  }
+  return out;
+}
+
 /** Render an arbitrary bridge result as compact, embeddable text. */
 function compact(value: unknown): string {
   if (typeof value === "string") return value;
