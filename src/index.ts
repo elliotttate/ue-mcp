@@ -17,6 +17,8 @@ import { startFlowHttpServer } from "./flow/http-server.js";
 import type { FlowContext } from "./flow/context.js";
 import type { FlowConfig, PluginEntry } from "./flow/schema.js";
 import { loadPlugins, type PluginRecord } from "./plugin/loader.js";
+import { registerIntelligenceResources } from "./resources.js";
+import { startWatching } from "./intelligence/watch.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import yaml from "js-yaml";
@@ -209,6 +211,13 @@ async function main() {
     });
   }
 
+  // ── Project Intelligence resources (read-only browsable surfaces) ──
+  try {
+    registerIntelligenceResources(server, ctx);
+  } catch (e) {
+    console.error(`[ue-mcp] Failed to register intelligence resources: ${e instanceof Error ? e.message : e}`);
+  }
+
   // ── Load ue-mcp.yml and register flow tool ──────────────────────
   // Log initial load
   const initialLoad = loadFlowConfig(activeTools, configDir, {
@@ -261,6 +270,16 @@ async function main() {
     info("bridge", "editor not reachable - will retry in background", e);
   }
   bridge.startReconnecting();
+
+  // ── Optional auto-watch: keep the index fresh as files change ──────
+  if (project.isLoaded && project.config.intelligence?.watch && project.projectDir) {
+    try {
+      const started = startWatching(project.projectDir, project.projectName, bridge, project.config.intelligence);
+      console.error(`[ue-mcp] Project intelligence watch: ${started ? "active" : "unavailable on this platform"}`);
+    } catch (e) {
+      console.error(`[ue-mcp] Failed to start intelligence watch: ${e instanceof Error ? e.message : e}`);
+    }
+  }
 
   if (disabled.size > 0) {
     console.error(`[ue-mcp] Disabled categories: ${[...disabled].join(", ")}`);

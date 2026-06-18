@@ -8,6 +8,7 @@ import { z } from "zod";
 import { categoryTool, type ToolDef } from "../types.js";
 import { Indexer, indexStatus } from "../intelligence/indexer.js";
 import { generateProjectSummary } from "../intelligence/summary.js";
+import { startWatching, stopWatching, isWatching } from "../intelligence/watch.js";
 import { indexIgnorePath } from "../intelligence/paths.js";
 import * as fs from "node:fs";
 
@@ -70,6 +71,23 @@ export const indexTool: ToolDef = categoryTool(
         );
       },
     },
+    watch: {
+      description:
+        "Start or stop watching the project for changes and incrementally re-indexing (debounced). Params: enabled (true to start, false to stop)",
+      handler: async (ctx, p) => {
+        ctx.project.ensureLoaded();
+        const dir = ctx.project.projectDir!;
+        if (p.enabled === false) {
+          return { ok: true, watching: false, stopped: stopWatching(dir) };
+        }
+        const started = startWatching(dir, ctx.project.projectName, ctx.bridge, cfgOf(ctx));
+        return {
+          ok: started,
+          watching: isWatching(dir),
+          note: started ? undefined : "Recursive file watching is not available on this platform.",
+        };
+      },
+    },
     clear: {
       description: "Delete the index (vectors, manifest, graph). The next build is a full rebuild.",
       handler: async (ctx) => {
@@ -111,6 +129,7 @@ export const indexTool: ToolDef = categoryTool(
   {
     rebuild: z.boolean().optional().describe("Force a full clean rebuild"),
     includeAssets: z.boolean().optional().describe("Index blueprint/asset summaries via the editor (default true)"),
+    enabled: z.boolean().optional().describe("watch: true to start watching, false to stop"),
     path: z.string().optional().describe("File/folder path for ingest"),
     set: z.array(z.string()).optional().describe("Patterns to write for ignore_patterns"),
   },
