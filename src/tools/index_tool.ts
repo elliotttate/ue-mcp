@@ -9,6 +9,7 @@ import { categoryTool, type ToolDef } from "../types.js";
 import { Indexer, indexStatus } from "../intelligence/indexer.js";
 import { generateProjectSummary } from "../intelligence/summary.js";
 import { startWatching, stopWatching, isWatching } from "../intelligence/watch.js";
+import { compressText } from "../intelligence/compress.js";
 import { indexIgnorePath } from "../intelligence/paths.js";
 import * as fs from "node:fs";
 
@@ -107,6 +108,23 @@ export const indexTool: ToolDef = categoryTool(
         return indexer.ingest(target);
       },
     },
+    compress: {
+      description:
+        "Compress text losslessly by aliasing repeated file paths/identifiers with a legend (§ids the agent can dereference). Cuts tokens without dropping information. Params: text",
+      handler: async (ctx, p) => {
+        ctx.project.ensureLoaded();
+        const text = String(p.text ?? "");
+        if (!text) throw new Error("index.compress requires 'text'");
+        const r = compressText(text);
+        return {
+          text: r.text,
+          legend: r.legend,
+          originalChars: r.originalChars,
+          compressedChars: r.compressedChars,
+          savedPct: r.savedPct,
+        };
+      },
+    },
     ignore_patterns: {
       description:
         "Read or set the .ue-mcp/INDEX_IGNORE patterns (gitignore-lite). Params: set? (string[] to write); omit to read.",
@@ -131,6 +149,7 @@ export const indexTool: ToolDef = categoryTool(
     includeAssets: z.boolean().optional().describe("Index blueprint/asset summaries via the editor (default true)"),
     enabled: z.boolean().optional().describe("watch: true to start watching, false to stop"),
     path: z.string().optional().describe("File/folder path for ingest"),
+    text: z.string().optional().describe("Text to compress"),
     set: z.array(z.string()).optional().describe("Patterns to write for ignore_patterns"),
   },
 );

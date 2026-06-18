@@ -9,6 +9,7 @@ import { categoryTool, type ToolDef, type ToolContext } from "../types.js";
 import { loadIndex } from "../intelligence/indexer.js";
 import { searchIndex, type SearchMode } from "../intelligence/search.js";
 import { grepProject } from "../intelligence/grep.js";
+import { compressCorpus } from "../intelligence/compress.js";
 import type { IntelligenceConfig } from "../intelligence/config.js";
 import type { ChunkKind } from "../intelligence/types.js";
 
@@ -73,6 +74,7 @@ export const searchTool: ToolDef = categoryTool(
       .describe("Restrict to a chunk kind"),
     sourcePrefix: z.string().optional().describe("Restrict to sources starting with this string"),
     maxTokens: z.number().int().min(50).optional().describe("Trim results to fit this total snippet token budget"),
+    compress: z.boolean().optional().describe("Losslessly compress result snippets via a shared alias legend"),
     regex: z.boolean().optional().describe("grep: treat query as a regular expression"),
     ignoreCase: z.boolean().optional().describe("grep: case-insensitive match"),
     ext: z.array(z.string()).optional().describe("grep: restrict to file extensions"),
@@ -102,5 +104,12 @@ async function runSearch(
     lexical: mode === "semantic" ? undefined : idx.getLexical(),
     maxTokens: typeof p.maxTokens === "number" ? p.maxTokens : undefined,
   });
+  if (p.compress === true && hits.length > 0) {
+    const c = compressCorpus(hits.map((h) => h.snippet));
+    hits.forEach((h, i) => {
+      h.snippet = c.parts[i];
+    });
+    return { query, mode, provider: idx.store.provider, count: hits.length, legend: c.legend, savedPct: c.savedPct, hits };
+  }
   return { query, mode, provider: idx.store.provider, count: hits.length, hits };
 }

@@ -19,7 +19,7 @@ flowchart LR
 
 | Tool | Purpose | Key actions |
 |------|---------|-------------|
-| `index` | Build/maintain the semantic index | `build`, `update`, `status`, `summary`, `watch`, `clear`, `ingest`, `ignore_patterns` |
+| `index` | Build/maintain the semantic index | `build`, `update`, `status`, `summary`, `watch`, `clear`, `ingest`, `compress`, `ignore_patterns` |
 | `search` | Retrieve relevant chunks with provenance | `hybrid`, `semantic`, `code_examples`, `references`, `grep` |
 | `graph` | Project knowledge graph | `build`, `project_map`, `hubs`, `neighbors`, `dependents`, `subgraph`, `path`, `find`, `stats`, `mermaid`, `blueprint` |
 | `memory` | Durable cross-session notes | `list`, `read`, `write`, `append`, `delete` |
@@ -77,6 +77,13 @@ The layer also exposes read-only, browsable MCP resources (no tool call needed):
 | `ue://project-map` | Knowledge-graph overview: node/edge counts and the top hubs |
 | `ue://memory` | List of project memories |
 | `ue://memory/{name}` | A single memory's markdown |
+
+## Saving context
+
+Two complementary ways to keep large results inside a token budget:
+
+- `search(..., maxTokens=N)` - lossy: keep the highest-ranked hits that fit.
+- `search(..., compress=true)` or `index(action="compress", text=...)` - **lossless**: replace repeated file paths and identifiers with short `§a` aliases and return a legend the agent dereferences. Path-heavy result sets routinely shrink 40-65% with no information lost.
 
 ## Diagrams (mermaid)
 

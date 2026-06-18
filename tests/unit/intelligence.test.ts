@@ -413,6 +413,37 @@ describe("lexical index + token budget", () => {
   });
 });
 
+describe("context compression", () => {
+  it("aliases repeated paths/identifiers losslessly with real savings", async () => {
+    const { compressText, alphabetId } = await import("../../src/intelligence/compress.js");
+    expect(alphabetId(0)).toBe("a");
+    expect(alphabetId(26)).toBe("aa");
+
+    const repeated = "/Game/FirstPerson/Blueprints/BP_FirstPersonCharacter";
+    const text = Array.from({ length: 6 }, (_, i) => `ref ${i}: ${repeated} uses AFWFPSCharacterComponent`).join("\n");
+    const r = compressText(text);
+
+    // It found aliases and shortened the text.
+    expect(Object.keys(r.legend).length).toBeGreaterThan(0);
+    expect(r.compressedChars).toBeLessThan(r.originalChars);
+    expect(r.savedPct).toBeGreaterThan(0);
+
+    // Lossless: substituting each alias back reproduces the original.
+    let restored = r.text;
+    for (const [alias, value] of Object.entries(r.legend)) {
+      restored = restored.split(alias).join(value);
+    }
+    expect(restored).toBe(text);
+  });
+
+  it("returns text unchanged when nothing recurs enough", async () => {
+    const { compressText } = await import("../../src/intelligence/compress.js");
+    const r = compressText("a short unique line with no repeats");
+    expect(Object.keys(r.legend).length).toBe(0);
+    expect(r.text).toBe("a short unique line with no repeats");
+  });
+});
+
 describe("mermaid rendering", () => {
   it("renders a knowledge-graph subset as a flowchart", async () => {
     const { graphToMermaid } = await import("../../src/intelligence/mermaid.js");

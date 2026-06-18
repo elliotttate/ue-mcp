@@ -189,6 +189,7 @@ ue-mcp.yml under ue-mcp.intelligence.embedding to upgrade).
 
   index    — build/maintain the semantic index of code, config, docs, blueprint summaries
              index(action="build") · status · summary · ingest(path=...) · watch(enabled=true)
+             index(action="compress", text=...) or search(compress=true) → lossless alias compaction to save tokens
   search   — retrieve relevant chunks with file/line provenance
              search(action="hybrid", query="...")   (also: semantic, code_examples, references)
              search(action="grep", query="...", regex=true)   — exact filesystem search, no index needed
