@@ -45,9 +45,12 @@ export const graphTool: ToolDef = categoryTool(
           includeCode: p.includeCode !== false,
           onProgress: (m) => console.error(`[ue-mcp][graph] ${m}`),
         });
-        const note = !ctx.bridge.isConnected
-          ? "Editor not connected — only the C++ include graph was built. Connect the editor and rebuild to add blueprint dependency edges."
-          : undefined;
+        let note: string | undefined;
+        if (!ctx.bridge.isConnected) {
+          note = stats.cachedDeps > 0
+            ? "Editor not connected — blueprint edges use dependencies cached from the last index build. Run index(build) with the editor connected to refresh them."
+            : "Editor not connected and no cached blueprint deps were found — only the C++ include graph was built. Run index(build) with the editor connected, then rebuild the graph.";
+        }
         return { ok: true, stats, note };
       },
     },
@@ -100,8 +103,9 @@ export const graphTool: ToolDef = categoryTool(
           depth,
           nodeCount: sg.nodes.length,
           edgeCount: sg.edges.length,
+          truncated: sg.truncated,
           nodes: sg.nodes.map((n) => ({ id: n.id, kind: n.kind })),
-          edges: sg.edges,
+          edges: sg.edges.slice(0, 1000),
         };
       },
     },

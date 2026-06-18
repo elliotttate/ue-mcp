@@ -31,6 +31,7 @@ import {
   CATALOGUE_VERSION,
 } from "./manifest.js";
 import { manifestPath, vectorStorePath, indexDir, ensureDir } from "./paths.js";
+import { withProjectLock } from "./locks.js";
 
 const DEFAULT_MAX_FILE_SIZE = 1024 * 1024; // 1 MiB
 const EMBED_GROUP = 256;
@@ -39,6 +40,13 @@ export interface IndexBuildOptions {
   rebuild?: boolean;
   includeAssets?: boolean;
   onProgress?: (msg: string) => void;
+}
+
+export interface IngestResult {
+  ok: boolean;
+  ingested: string[];
+  chunks: number;
+  failures: Array<{ file: string; reason: string }>;
 }
 
 export interface IndexStats {
@@ -77,6 +85,8 @@ interface PendingSource {
   rec: FileRecord;
   hash: string;
   chunks: Chunk[];
+  /** Blueprint dependency ids, cached into the manifest for the graph. */
+  dependencies?: string[];
 }
 
 export class Indexer {
@@ -93,12 +103,11 @@ export class Indexer {
    * sources. Reuses the configured embedding provider; refuses if it would mix
    * vectors from two different providers.
    */
-  async ingest(target: string): Promise<{
-    ok: boolean;
-    ingested: string[];
-    chunks: number;
-    failures: Array<{ file: string; reason: string }>;
-  }> {
+  async ingest(target: string): Promise<IngestResult> {
+    return withProjectLock(`index:${this.projectDir}`, () => this.ingestInternal(target));
+  }
+
+  private async ingestInternal(target: string): Promise<IngestResult> {
     const provider = createEmbeddingProvider(this.cfg.embedding);
     const providerKey = provider.key;
     const storeFile = vectorStorePath(this.projectDir);
@@ -192,7 +201,13 @@ export class Indexer {
     }
   }
 
+  /** Build/refresh the index. Serialized per project so two concurrent builds
+   *  cannot corrupt the shared store and manifest. */
   async build(opts: IndexBuildOptions = {}): Promise<IndexStats> {
+    return withProjectLock(`index:${this.projectDir}`, () => this.buildInternal(opts));
+  }
+
+  private async buildInternal(opts: IndexBuildOptions = {}): Promise<IndexStats> {
     const startedAt = Date.now();
     const log = opts.onProgress ?? (() => {});
     const provider = createEmbeddingProvider(this.cfg.embedding);
@@ -254,6 +269,7 @@ export class Indexer {
 
     for (const rec of [...diff.added, ...diff.changed]) {
       let chunks: Chunk[] = [];
+      let dependencies: string[] | undefined;
       if (rec.kind === "blueprint") {
         const gamePath = toGamePath(rec.relPath, this.projectName);
         const summary = await extractBlueprintSummary(this.bridge, gamePath);
@@ -262,6 +278,7 @@ export class Indexer {
           continue; // not recorded → retried on a later build when bridge is up
         }
         chunks = chunkBlob(gamePath, summary.text, "blueprint", summary.symbol);
+        dependencies = summary.dependencies;
         assetsIndexed++;
       } else {
         const text = readText(rec.absPath);
@@ -269,7 +286,7 @@ export class Indexer {
         chunks = chunkText(rec.relPath, text, rec.kind, LANG[rec.ext]);
       }
       if (chunks.length === 0) continue;
-      pending.push({ rec, hash: diff.hashes.get(rec.relPath) ?? hashFile(rec), chunks });
+      pending.push({ rec, hash: diff.hashes.get(rec.relPath) ?? hashFile(rec), chunks, dependencies });
       allChunks.push(...chunks);
     }
 
@@ -312,7 +329,12 @@ export class Indexer {
 
     // Record manifest entries for everything we indexed this pass.
     for (const p of pending) {
-      activeManifest.files[p.rec.relPath] = manifestEntryFor(p.rec, p.hash, p.chunks.map((c) => c.id));
+      activeManifest.files[p.rec.relPath] = manifestEntryFor(
+        p.rec,
+        p.hash,
+        p.chunks.map((c) => c.id),
+        p.dependencies,
+      );
     }
 
     // Persist (create an empty store for empty projects so status works).

@@ -68,6 +68,9 @@ export interface ManifestEntry {
   kind: ChunkKind;
   /** Chunk ids produced from this source (so we can evict on change/delete). */
   chunkIds: string[];
+  /** For blueprint/asset sources: cached dependency ids from extraction, so the
+   *  knowledge graph can be (re)built without re-querying the editor. */
+  dependencies?: string[];
 }
 
 export interface IndexManifest {

@@ -106,7 +106,12 @@ export function diffManifest(
   return { added, changed, removed, hashes };
 }
 
-export function manifestEntryFor(rec: FileRecord, hash: string, chunkIds: string[]): ManifestEntry {
+export function manifestEntryFor(
+  rec: FileRecord,
+  hash: string,
+  chunkIds: string[],
+  dependencies?: string[],
+): ManifestEntry {
   return {
     source: rec.relPath,
     hash,
@@ -114,5 +119,6 @@ export function manifestEntryFor(rec: FileRecord, hash: string, chunkIds: string
     size: rec.size,
     kind: rec.kind,
     chunkIds,
+    dependencies,
   };
 }
