@@ -1,6 +1,6 @@
 # Tool Reference
 
-UE-MCP exposes **<!-- count:tools -->21<!-- /count --> category tools** covering **<!-- count:actions -->569+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
+UE-MCP exposes **<!-- count:tools -->28<!-- /count --> category tools** covering **<!-- count:actions -->609+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
 
 !!! tip "First call in any session"
     Start with `project(action="get_status")` to check the connection, then `level(action="get_outliner")` or `asset(action="list")` to explore.
@@ -804,3 +804,106 @@ UE-MCP exposes **<!-- count:tools -->21<!-- /count --> category tools** covering
 |--------|-------------|
 | `list` | Every plugin loaded from ue-mcp.yml: name, version, prefix, status, and injected actions |
 | `describe` | Full detail for one plugin including knowledge files and flows. Params: `name` |
+
+---
+
+## index
+
+*Build and maintain the project's semantic index (code, config, docs, blueprint summaries) used by search and graph. Runs locally; blueprint summaries need the editor connected.*
+
+| Action | Description |
+|--------|-------------|
+| `build` | Full or incremental index build. Params: `rebuild? (force clean rebuild), includeAssets? (index blueprint summaries via the editor; default true)` |
+| `update` | Incremental index update (alias for build with rebuild=false) |
+| `status` | Report index state (provider, dimensions, sources, chunk count) without rebuilding |
+| `summary` | Project overview: a structural digest (counts by kind/language, top directories, dependency hubs, README excerpt). Narrates to prose if a summarizer is configured, otherwise returns the digest for the agent to narrate |
+| `watch` | Start or stop watching the project for changes and incrementally re-indexing (debounced). Params: `enabled (true to start, false to stop)` |
+| `clear` | Delete the index (vectors, manifest, graph). The next build is a full rebuild |
+| `ingest` | Parse and index an external document or folder (PDF/DOCX/PPTX/XLSX/MD/TXT) into the project index. Params: `path (absolute or project-relative)` |
+| `compress` | Compress text losslessly by aliasing repeated file paths/identifiers with a legend (§ids the agent can dereference). Cuts tokens without dropping information. Params: `text` |
+| `ignore_patterns` | Read or set the .ue-mcp/INDEX_IGNORE patterns (gitignore-lite). Params: `set? (string[] to write); omit to read` |
+
+---
+
+## search
+
+*Semantic + lexical retrieval over the indexed project (code, config, docs, blueprint summaries). Build the index first with the `index` tool.*
+
+| Action | Description |
+|--------|-------------|
+| `semantic` | Pure embedding similarity search. Params: `query, k?, kind?, sourcePrefix?` |
+| `hybrid` | Fused semantic + lexical search (best default for code). Params: `query, k?, kind?, sourcePrefix?` |
+| `code_examples` | Retrieve example code chunks relevant to a query (kind=code). Params: `query, k?` |
+| `references` | Find where a symbol/identifier appears across the codebase (lexical-first). Params: `query (the symbol), k?` |
+| `grep` | Literal/regex filesystem search over project text files. No index required. Params: `query, regex?, ignoreCase?, ext? (e.g. [".cpp",".h"]), sourcePrefix?, maxResults?` |
+
+---
+
+## graph
+
+*Project knowledge graph (blueprint dependencies + C++ includes) with hub/centrality ranking and path queries. Build it first; blueprint edges need the editor connected.*
+
+| Action | Description |
+|--------|-------------|
+| `build` | Build the knowledge graph. Params: `includeAssets? (blueprint deps via editor; default true), includeCode? (C++ includes; default true)` |
+| `stats` | Graph summary: node/edge counts by kind plus the top hubs |
+| `project_map` | High-level project map: counts by kind, edge totals, and the most central blueprints and files |
+| `neighbors` | Direct neighbors of a node. Params: `node (id), direction? (out\\|in\\|both)` |
+| `dependents` | What depends on a node (reverse dependencies / subclasses / includers). Params: `node (id)` |
+| `subgraph` | k-hop neighborhood around a node. Params: `node (id), depth? (default 1)` |
+| `path` | Shortest dependency path between two nodes. Params: `from (id), to (id)` |
+| `hubs` | Most-depended-on nodes (by in-degree, then centrality). Params: `limit?, kind? (blueprint\\|asset\\|file)` |
+| `mermaid` | Render the knowledge graph as a mermaid flowchart: a node's neighborhood (node + depth?) or, with no node, a top-hubs overview. Params: `node?, depth?, direction? (LR\\|TD)` |
+| `blueprint` | Render a blueprint's graph (execution flow solid, data flow dotted) as a mermaid diagram. Requires the editor connected. Params: `path (/Game/...), graphName? (default EventGraph)` |
+| `find` | Find nodes whose id/label matches a query. Params: `query` |
+
+---
+
+## memory
+
+*Durable project memory: markdown notes the agent keeps across sessions (decisions, conventions, gotchas, TODOs). Stored under .ue-mcp/memory/.*
+
+| Action | Description |
+|--------|-------------|
+| `list` | List all memories with their titles |
+| `read` | Read a memory by name. Params: `name` |
+| `write` | Create or overwrite a memory. Params: `name, content` |
+| `append` | Append to a memory (creates it if missing). Params: `name, content` |
+| `delete` | Delete a memory. Params: `name` |
+
+---
+
+## context
+
+*Capture the live editor working context (selection, viewport, level) as a structured bundle for the agent. Requires the editor connected.*
+
+| Action | Description |
+|--------|-------------|
+| `get` | Assemble a context bundle: current selection + viewport camera + level |
+| `capture_selection` | Detailed dump of every selected actor (label, class, properties). Params: `includeProperties?` |
+| `capture_viewport` | Screenshot the active viewport and return the camera info. Params: `filename? (default Saved screenshot)` |
+
+---
+
+## image
+
+*Generate images from text prompts (OpenAI / Stability / Replicate, configured locally) and import them into the project as textures.*
+
+| Action | Description |
+|--------|-------------|
+| `generate` | Generate a PNG from a prompt and save it under .ue-mcp/generated-images/. Params: `prompt, size?` |
+| `import` | Import an existing image file into the project as a texture. Params: `file (absolute path), destPath (/Game/...), name?` |
+| `generate_and_import` | Generate from a prompt and import the result as a texture in one call. Params: `prompt, destPath (/Game/...), name?, size?` |
+| `list` | List images generated for this project |
+
+---
+
+## validate
+
+*Validate Unreal identifiers, code, and blueprint plans against the live reflection database (local, no cloud). Requires the editor connected to verify; otherwise reports 'unverified'.*
+
+| Action | Description |
+|--------|-------------|
+| `unreal_code` | Extract UE identifiers from a code snippet and check each against reflection. Params: `code` |
+| `identifiers` | Validate a list of class/type identifiers. Params: `identifiers (array or comma/space-separated string)` |
+| `blueprint_plan` | Validate node/function/class names referenced by a blueprint plan. Params: `plan (object or JSON string)` |
