@@ -144,6 +144,11 @@ void FBlueprintHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("connect_pins_batch"), &ConnectPinsBatch);
 	Registry.RegisterHandler(TEXT("set_node_position"), &SetNodePosition);
 	Registry.RegisterHandler(TEXT("auto_layout_graph"), &AutoLayoutGraph);
+	Registry.RegisterHandler(TEXT("describe_blueprint_graph"), &DescribeBlueprintGraph);
+	Registry.RegisterHandler(TEXT("lint_blueprints"), &LintBlueprints);
+	Registry.RegisterHandler(TEXT("author_blueprint_logic"), &AuthorLogic);
+	Registry.RegisterHandler(TEXT("insert_blueprint_logic"), &InsertLogic);
+	Registry.RegisterHandler(TEXT("undo_last_authored"), &UndoLastAuthored);
 }
 
 // ---------------------------------------------------------------------------
