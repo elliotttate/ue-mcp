@@ -136,4 +136,9 @@ private:
 	// #279: detect stuck-unloadable assets and recover without editor restart
 	static TSharedPtr<FJsonValue> HealthCheck(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ForceReload(const TSharedPtr<FJsonObject>& Params);
+
+	// Universal agent-readable summary. Auto-detects asset type and renders a
+	// compact text digest: Blueprint (parent/components/vars/graphs + perf
+	// smells), BehaviorTree (tree structure), Material (params + settings).
+	static TSharedPtr<FJsonValue> DescribeAsset(const TSharedPtr<FJsonObject>& Params);
 };

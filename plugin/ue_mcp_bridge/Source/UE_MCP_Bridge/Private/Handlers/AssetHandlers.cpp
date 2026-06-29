@@ -199,6 +199,8 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// #279: detect/recover stuck-unloadable assets
 	Registry.RegisterHandler(TEXT("asset_health_check"), &HealthCheck);
 	Registry.RegisterHandler(TEXT("force_reload_asset"), &ForceReload);
+	// Universal agent-readable asset summary (Blueprint/BehaviorTree/Material/...)
+	Registry.RegisterHandler(TEXT("describe_asset"), &DescribeAsset);
 
 	// Additional DataTable handlers
 	Registry.RegisterHandler(TEXT("create_datatable"), &CreateDataTable);
