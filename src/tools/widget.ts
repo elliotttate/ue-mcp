@@ -19,6 +19,7 @@ export const widgetTool: ToolDef = categoryTool(
     create_utility_blueprint: bp("Create editor utility blueprint. Params: name, packagePath?", "create_editor_utility_blueprint"),
     run_utility_blueprint:    bp("Run editor utility blueprint. Params: assetPath", "run_editor_utility_blueprint"),
     add_widget:               bp("Add widget to widget tree. Params: assetPath, widgetClass, widgetName?, parentWidgetName?", "add_widget"),
+    apply_layout:             bp("Build/configure a whole widget tree from an ordered hierarchy spec in one pass (single compile+save). PREFERRED for multi-widget UI. Params: assetPath, layout: [{type, name?, parent?, properties?, slotProperties?}]. type=widget class short name; parent=name of an existing/earlier entry (omit for root); properties/slotProperties are {propName: value} applied via the same setter as set_property (nested structs, enums, dotted paths supported). Idempotent: an existing name is reused.", "apply_widget_layout", (p) => ({ assetPath: p.assetPath ?? p.path, layout: p.layout })),
     remove_widget:            bp("Remove widget from tree. Params: assetPath, widgetName", "remove_widget"),
     move_widget:              bp("Reparent widget. Params: assetPath, widgetName, newParentWidgetName", "move_widget"),
     set_root:                 bp("Replace WBP root with an existing widget by name (#365). Params: assetPath, widgetName", "set_root_widget", (p) => ({ assetPath: p.assetPath, path: p.path, widgetName: p.widgetName })),
@@ -54,5 +55,12 @@ export const widgetTool: ToolDef = categoryTool(
     wrapperClass: z.string().optional().describe("wrap_root: panel widget class (CanvasPanel, VerticalBox, Overlay, etc.)"),
     wrapperName: z.string().optional().describe("wrap_root: optional name for the new wrapper widget"),
     path: z.string().optional().describe("Alias for assetPath"),
+    layout: z.array(z.object({
+      type: z.string(),
+      name: z.string().optional(),
+      parent: z.string().optional(),
+      properties: z.record(z.unknown()).optional(),
+      slotProperties: z.record(z.unknown()).optional(),
+    })).optional().describe("apply_layout: ordered widget hierarchy spec"),
   },
 );

@@ -24,6 +24,9 @@ private:
 	static TSharedPtr<FJsonValue> RunEditorUtilityWidget(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> RunEditorUtilityBlueprint(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AddWidget(const TSharedPtr<FJsonObject>& Params);
+	// Batch UMG authoring: build/configure a whole widget tree from an ordered
+	// hierarchy spec in one pass (single compile + save).
+	static TSharedPtr<FJsonValue> ApplyLayout(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> RemoveWidget(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> MoveWidget(const TSharedPtr<FJsonObject>& Params);
 	// #365: root-widget swap + "Wrap With" container insertion. Required to

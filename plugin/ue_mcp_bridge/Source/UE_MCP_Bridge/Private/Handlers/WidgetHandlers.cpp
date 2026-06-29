@@ -74,6 +74,7 @@ void FWidgetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("run_editor_utility_widget"), &RunEditorUtilityWidget);
 	Registry.RegisterHandler(TEXT("run_editor_utility_blueprint"), &RunEditorUtilityBlueprint);
 	Registry.RegisterHandler(TEXT("add_widget"), &AddWidget);
+	Registry.RegisterHandler(TEXT("apply_widget_layout"), &ApplyLayout);
 	Registry.RegisterHandler(TEXT("remove_widget"), &RemoveWidget);
 	Registry.RegisterHandler(TEXT("move_widget"), &MoveWidget);
 	Registry.RegisterHandler(TEXT("set_root_widget"), &SetRoot);
