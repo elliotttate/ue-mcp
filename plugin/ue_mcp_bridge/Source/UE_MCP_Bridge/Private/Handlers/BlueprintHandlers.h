@@ -91,9 +91,34 @@ private:
 	// path; raw property writes leave the visualizer stale)
 	static TSharedPtr<FJsonValue> SetCapsuleSize(const TSharedPtr<FJsonObject>& Params);
 
+	// Graph -> readable pseudocode. Walks exec chains emitting indented text so
+	// agents can read existing logic cheaply (inverse of the authoring compiler).
+	static TSharedPtr<FJsonValue> DescribeBlueprintGraph(const TSharedPtr<FJsonObject>& Params);
+
+	// Anti-pattern report over one Blueprint or a folder of them (Event Tick
+	// logic, GetAllActorsOfClass on Tick, very large graphs).
+	static TSharedPtr<FJsonValue> LintBlueprints(const TSharedPtr<FJsonObject>& Params);
+
+	// Pseudocode -> Blueprint graph compiler. Parses a constrained C++-style
+	// block (events, sequential calls with auto-wired args, value bindings,
+	// variable sets, if/else branches) into a wired EventGraph.
+	static TSharedPtr<FJsonValue> AuthorLogic(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> InsertLogic(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> UndoLastAuthored(const TSharedPtr<FJsonObject>& Params);
+
 	// Helper functions
 	static class UBlueprint* LoadBlueprint(const FString& AssetPath);
-	static struct FEdGraphPinType MakePinType(const FString& TypeStr);
 	static class UEdGraph* FindGraph(class UBlueprint* Blueprint, const FString& GraphName);
 	static class UEdGraphNode* FindNodeByGuidOrName(class UEdGraph* Graph, const FString& NodeId);
+
+public:
+	// Reusable type-string -> pin-type resolver. Public so sibling handlers
+	// (create_struct, the logic-authoring compiler) can share one mapping
+	// instead of re-deriving it. Handles scalars, structs, enums, object/
+	// class refs (incl. soft variants), and full asset paths.
+	static struct FEdGraphPinType MakePinType(const FString& TypeStr);
+
+	// Render one graph as indented exec-chain pseudocode. Public so the
+	// universal asset(describe) handler can reuse it for Blueprint assets.
+	static FString DescribeGraphAsText(class UEdGraph* Graph);
 };

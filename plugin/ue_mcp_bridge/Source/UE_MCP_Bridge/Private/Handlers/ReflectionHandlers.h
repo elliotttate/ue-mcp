@@ -20,6 +20,12 @@ private:
 	static TSharedPtr<FJsonValue> CreateGameplayTag(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CreateEnum(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetEnumEntries(const TSharedPtr<FJsonObject>& Params);
+	// User Defined Struct authoring — sibling of CreateEnum/SetEnumEntries.
+	static TSharedPtr<FJsonValue> CreateStruct(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetStructFields(const TSharedPtr<FJsonObject>& Params);
+	// Live reflected-API search — find BlueprintCallable/Pure UFunctions by
+	// keyword across name, params, return type, owning class, tooltip.
+	static TSharedPtr<FJsonValue> SearchFunctions(const TSharedPtr<FJsonObject>& Params);
 
 	// Helper functions
 	static UClass* FindClass(const FString& ClassName);
