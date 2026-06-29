@@ -202,6 +202,9 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// Kismet, anything user-defined). Pair with editor.invoke_function to
 	// drive GeometryScript ops from MCP without hand-writing each handler.
 	Registry.RegisterHandler(TEXT("list_function_libraries"), &ListFunctionLibraries);
+	// Live working-context capture (active graph selection + content browser).
+	Registry.RegisterHandler(TEXT("get_selected_graph_nodes"), &GetSelectedGraphNodes);
+	Registry.RegisterHandler(TEXT("get_content_browser_selection"), &GetContentBrowserSelection);
 }
 
 TSharedPtr<FJsonValue> FEditorHandlers::ExecuteCommand(const TSharedPtr<FJsonObject>& Params)

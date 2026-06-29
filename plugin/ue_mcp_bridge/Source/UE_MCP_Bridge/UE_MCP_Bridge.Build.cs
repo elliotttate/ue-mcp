@@ -32,6 +32,7 @@ public class UE_MCP_Bridge : ModuleRules
 				"BlueprintGraph",
 				"Blutility",
 				"ContentBrowser",
+				"ContentBrowserData",
 				"ControlRig",
 				"ControlRigDeveloper",
 				"DataValidation",

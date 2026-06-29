@@ -94,6 +94,20 @@ export const contextTool: ToolDef = categoryTool(
         return { screenshot: shot ?? null, viewport: viewport ?? null };
       },
     },
+    capture_graph_selection: {
+      description: "Describe the nodes selected in the active asset-editor graph (Blueprint/Widget/Animation) as readable pseudocode + a node list. Use for 'explain this selection' or to anchor blueprint(insert_logic). Params: none",
+      handler: async (ctx) => {
+        requireEditor(ctx);
+        return ctx.bridge.call("get_selected_graph_nodes", {}, 15_000);
+      },
+    },
+    content_browser: {
+      description: "The Content Browser's current folder + the assets selected in it. Use for 'make one of these' / 'use the selected asset'. Params: none",
+      handler: async (ctx) => {
+        requireEditor(ctx);
+        return ctx.bridge.call("get_content_browser_selection", {}, 15_000);
+      },
+    },
   },
   undefined,
   {

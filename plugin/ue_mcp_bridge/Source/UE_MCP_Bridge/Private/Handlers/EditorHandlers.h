@@ -178,4 +178,10 @@ private:
 	// Kismet*, AnimationLibrary, user-defined) so invoke_function callers
 	// can find the libraries that expose the ops they want.
 	static TSharedPtr<FJsonValue> ListFunctionLibraries(const TSharedPtr<FJsonObject>& Params);
+
+	// Live working-context capture: nodes selected in the active graph editor
+	// (Blueprint/Widget/Anim) rendered as text, and the Content Browser's
+	// current folder + selected assets. Lets agents act on "what's open/selected".
+	static TSharedPtr<FJsonValue> GetSelectedGraphNodes(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> GetContentBrowserSelection(const TSharedPtr<FJsonObject>& Params);
 };
