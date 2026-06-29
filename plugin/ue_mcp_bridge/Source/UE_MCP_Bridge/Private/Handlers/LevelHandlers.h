@@ -83,6 +83,8 @@ private:
 	static TSharedPtr<FJsonValue> SetStreamingSublevelProperties(const TSharedPtr<FJsonObject>& Params);
 	// #203: batch spawn / batch transform
 	static TSharedPtr<FJsonValue> SpawnGrid(const TSharedPtr<FJsonObject>& Params);
+	// Scatter N actors randomly within the bounds of another (or selected) actor.
+	static TSharedPtr<FJsonValue> ScatterActors(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> BatchTranslate(const TSharedPtr<FJsonObject>& Params);
 	// #264: explicit per-instance batch spawn (mesh+transform per actor)
 	static TSharedPtr<FJsonValue> PlaceActorsBatch(const TSharedPtr<FJsonObject>& Params);

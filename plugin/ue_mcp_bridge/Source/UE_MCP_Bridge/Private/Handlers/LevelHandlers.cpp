@@ -138,6 +138,7 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("remove_streaming_sublevel"), &RemoveStreamingSublevel);
 	Registry.RegisterHandler(TEXT("set_streaming_sublevel_properties"), &SetStreamingSublevelProperties);
 	Registry.RegisterHandler(TEXT("spawn_grid"), &SpawnGrid);
+	Registry.RegisterHandler(TEXT("scatter_actors"), &ScatterActors);
 	Registry.RegisterHandler(TEXT("batch_translate"), &BatchTranslate);
 	Registry.RegisterHandler(TEXT("place_actors_batch"), &PlaceActorsBatch);
 }
@@ -2980,6 +2981,124 @@ TSharedPtr<FJsonValue> FLevelHandlers::SpawnGrid(const TSharedPtr<FJsonObject>& 
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
+	Result->SetNumberField(TEXT("count"), Spawned.Num());
+	Result->SetArrayField(TEXT("labels"), Spawned);
+	return MCPResult(Result);
+}
+
+// Scatter N actors randomly inside the world-space bounds of another actor
+// (a "spawn volume"). The bounding actor is named by label, or the current
+// editor selection via useSelected. Spawns StaticMeshActors for staticMesh,
+// or instances of actorClass (short name / C++ path / Blueprint asset path).
+TSharedPtr<FJsonValue> FLevelHandlers::ScatterActors(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+
+	const int32 Count = FMath::Clamp(OptionalInt(Params, TEXT("count"), 10), 1, 1000);
+
+	// Resolve the bounding actor: explicit label or the current selection.
+	AActor* BoundsActor = nullptr;
+	const FString BoundsLabel = OptionalString(Params, TEXT("boundsActorLabel"));
+	if (!BoundsLabel.IsEmpty())
+	{
+		BoundsActor = FindActorByLabel(World, BoundsLabel);
+		if (!BoundsActor) return MCPError(FString::Printf(TEXT("Bounds actor not found: %s"), *BoundsLabel));
+	}
+	else if (OptionalBool(Params, TEXT("useSelected"), false))
+	{
+		if (USelection* Selection = GEditor->GetSelectedActors())
+		{
+			BoundsActor = Selection->GetTop<AActor>();
+		}
+		if (!BoundsActor) return MCPError(TEXT("useSelected was set but no actor is selected"));
+	}
+	else
+	{
+		return MCPError(TEXT("Provide boundsActorLabel or useSelected=true to define the scatter volume"));
+	}
+
+	FVector Origin, Extent;
+	BoundsActor->GetActorBounds(false, Origin, Extent);
+
+	// Resolve what to spawn: a static mesh (-> StaticMeshActor) or an actor class.
+	const FString MeshPath = OptionalString(Params, TEXT("staticMesh"));
+	const FString ActorClassName = OptionalString(Params, TEXT("actorClass"));
+	UStaticMesh* Mesh = nullptr;
+	UClass* SpawnClass = nullptr;
+	if (!MeshPath.IsEmpty())
+	{
+		Mesh = LoadObject<UStaticMesh>(nullptr, *MeshPath);
+		if (!Mesh) return MCPError(FString::Printf(TEXT("StaticMesh not found: %s"), *MeshPath));
+	}
+	else if (!ActorClassName.IsEmpty())
+	{
+		// Short name, /Script path, or Blueprint asset path (with/without _C).
+		SpawnClass = FindClassByShortName(ActorClassName);
+		if (!SpawnClass) SpawnClass = LoadClass<AActor>(nullptr, *ActorClassName);
+		if (!SpawnClass && !ActorClassName.EndsWith(TEXT("_C")))
+		{
+			SpawnClass = LoadClass<AActor>(nullptr, *(ActorClassName + TEXT("_C")));
+		}
+		if (!SpawnClass)
+		{
+			if (UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *ActorClassName))
+			{
+				SpawnClass = BP->GeneratedClass;
+			}
+		}
+		if (!SpawnClass || !SpawnClass->IsChildOf(AActor::StaticClass()))
+		{
+			return MCPError(FString::Printf(TEXT("actorClass did not resolve to an Actor class: %s"), *ActorClassName));
+		}
+	}
+	else
+	{
+		return MCPError(TEXT("Provide staticMesh or actorClass"));
+	}
+
+	const bool bRandomYaw = OptionalBool(Params, TEXT("randomYaw"), true);
+	const double ScaleMin = OptionalNumber(Params, TEXT("scaleMin"), 1.0);
+	const double ScaleMax = OptionalNumber(Params, TEXT("scaleMax"), 1.0);
+	const double ZOffset = OptionalNumber(Params, TEXT("zOffset"), 0.0);
+	const FString LabelPrefix = OptionalString(Params, TEXT("labelPrefix"), TEXT("Scatter"));
+	const int32 Seed = OptionalInt(Params, TEXT("seed"), (int32)FDateTime::Now().GetTicks());
+	FRandomStream Rand(Seed);
+
+	TArray<TSharedPtr<FJsonValue>> Spawned;
+	for (int32 i = 0; i < Count; ++i)
+	{
+		const FVector Loc = Origin + FVector(
+			Rand.FRandRange(-Extent.X, Extent.X),
+			Rand.FRandRange(-Extent.Y, Extent.Y),
+			Rand.FRandRange(-Extent.Z, Extent.Z)) + FVector(0, 0, ZOffset);
+		const FRotator Rot = bRandomYaw ? FRotator(0.0, Rand.FRandRange(0.0, 360.0), 0.0) : FRotator::ZeroRotator;
+		const double S = Rand.FRandRange(ScaleMin, ScaleMax);
+
+		AActor* NewActor = nullptr;
+		FActorSpawnParameters SpawnParams;
+		if (Mesh)
+		{
+			AStaticMeshActor* SMA = World->SpawnActor<AStaticMeshActor>(AStaticMeshActor::StaticClass(), Loc, Rot, SpawnParams);
+			if (SMA)
+			{
+				SMA->SetMobility(EComponentMobility::Movable);
+				if (UStaticMeshComponent* SMC = SMA->GetStaticMeshComponent()) SMC->SetStaticMesh(Mesh);
+				NewActor = SMA;
+			}
+		}
+		else
+		{
+			NewActor = World->SpawnActor<AActor>(SpawnClass, Loc, Rot, SpawnParams);
+		}
+		if (!NewActor) continue;
+		NewActor->SetActorScale3D(FVector(S));
+		NewActor->SetActorLabel(FString::Printf(TEXT("%s_%d"), *LabelPrefix, i));
+		Spawned.Add(MakeShared<FJsonValueString>(NewActor->GetActorLabel()));
+	}
+
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetStringField(TEXT("boundsActor"), BoundsActor->GetActorLabel());
 	Result->SetNumberField(TEXT("count"), Spawned.Num());
 	Result->SetArrayField(TEXT("labels"), Spawned);
 	return MCPResult(Result);
