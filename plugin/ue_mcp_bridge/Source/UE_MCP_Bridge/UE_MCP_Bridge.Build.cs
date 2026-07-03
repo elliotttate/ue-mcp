@@ -67,6 +67,8 @@ public class UE_MCP_Bridge : ModuleRules
 				"PropertyBindingUtils",
 				"PropertyEditor",
 				"PythonScriptPlugin",
+				"RigVM",
+				"RigVMDeveloper",
 				"Sequencer",
 				"Slate",
 				"SlateCore",

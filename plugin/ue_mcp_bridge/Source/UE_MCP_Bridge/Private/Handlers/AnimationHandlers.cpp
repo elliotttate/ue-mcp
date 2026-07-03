@@ -119,6 +119,14 @@ void FAnimationHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 
 	// Control Rig (#11)
 	Registry.RegisterHandler(TEXT("list_control_rig_variables"), &ListControlRigVariables);
+	// Control Rig authoring (AnimationHandlers_ControlRig.cpp)
+	Registry.RegisterHandler(TEXT("create_control_rig"), &CreateControlRig);
+	Registry.RegisterHandler(TEXT("add_rig_bone"), &AddRigBone);
+	Registry.RegisterHandler(TEXT("add_rig_control"), &AddRigControl);
+	Registry.RegisterHandler(TEXT("add_rig_node"), &AddRigNode);
+	Registry.RegisterHandler(TEXT("connect_rig_pins"), &ConnectRigPins);
+	Registry.RegisterHandler(TEXT("set_rig_pin_default"), &SetRigPinDefault);
+	Registry.RegisterHandler(TEXT("read_rig_graph"), &ReadRigGraph);
 
 	// v0.7.11 — depth
 	Registry.RegisterHandler(TEXT("set_root_motion_settings"), &SetRootMotionSettings);
