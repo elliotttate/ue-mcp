@@ -2,7 +2,10 @@
 #include "HandlerRegistry.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
+#include "Misc/Paths.h"
+#include "HAL/PlatformFileManager.h"
 #include "Modules/ModuleManager.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
@@ -32,6 +35,85 @@ namespace
 		O->SetNumberField(TEXT("y"), V.Y);
 		O->SetNumberField(TEXT("z"), V.Z);
 		return O;
+	}
+
+	/**
+	 * Crash-recovery guard for index extraction. Before each asset is summarized
+	 * its path is written to a sentinel file; the sentinel is deleted when the
+	 * batch completes. A sentinel that survives into the next editor session
+	 * means that asset took the editor down mid-extraction, so it is appended to
+	 * a permanent skip list and never extracted again. Both files live under
+	 * Saved/UEMCP/ and are plain text - delete extract_skip_list.txt to retry.
+	 */
+	namespace ExtractCrashGuard
+	{
+		FString GuardDir() { return FPaths::ProjectSavedDir() / TEXT("UEMCP"); }
+		FString SentinelPath() { return GuardDir() / TEXT("extract_in_progress.txt"); }
+		FString SkipListPath() { return GuardDir() / TEXT("extract_skip_list.txt"); }
+
+		TSet<FString>& SkipSet()
+		{
+			static TSet<FString> Set;
+			return Set;
+		}
+
+		/** Promote a stale sentinel (left by a crashed session) to the skip list,
+		 *  then load the skip list. Runs once per editor session. */
+		void Initialize()
+		{
+			static bool bInitialized = false;
+			if (bInitialized)
+			{
+				return;
+			}
+			bInitialized = true;
+
+			IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+			FString StalePath;
+			if (FFileHelper::LoadFileToString(StalePath, *SentinelPath()))
+			{
+				StalePath.TrimStartAndEndInline();
+				if (!StalePath.IsEmpty())
+				{
+					UE_LOG(LogTemp, Warning,
+						TEXT("[UE-MCP] Index extraction of '%s' did not survive the previous editor session; adding it to %s"),
+						*StalePath, *SkipListPath());
+					FFileHelper::SaveStringToFile(StalePath + LINE_TERMINATOR, *SkipListPath(),
+						FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM,
+						&IFileManager::Get(), FILEWRITE_Append);
+				}
+				PlatformFile.DeleteFile(*SentinelPath());
+			}
+
+			TArray<FString> Lines;
+			if (FFileHelper::LoadFileToStringArray(Lines, *SkipListPath()))
+			{
+				for (FString& Line : Lines)
+				{
+					Line.TrimStartAndEndInline();
+					if (!Line.IsEmpty())
+					{
+						SkipSet().Add(Line);
+					}
+				}
+			}
+		}
+
+		bool IsSkipped(const FString& Path)
+		{
+			return SkipSet().Contains(Path);
+		}
+
+		void BeginAsset(const FString& Path)
+		{
+			FFileHelper::SaveStringToFile(Path, *SentinelPath(),
+				FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+		}
+
+		void EndBatch()
+		{
+			FPlatformFileManager::Get().GetPlatformFile().DeleteFile(*SentinelPath());
+		}
 	}
 }
 
@@ -131,7 +213,15 @@ TSharedPtr<FJsonValue> FProjectIntelligenceHandlers::ExtractIndexSummary(const T
 	{
 		return MakeErrorResult(TEXT("Missing 'path'"));
 	}
+	ExtractCrashGuard::Initialize();
+	if (ExtractCrashGuard::IsSkipped(Path))
+	{
+		return MakeErrorResult(FString::Printf(
+			TEXT("Skipped: %s crashed the editor during a previous extraction (delete Saved/UEMCP/extract_skip_list.txt to retry)"), *Path));
+	}
+	ExtractCrashGuard::BeginAsset(Path);
 	TSharedPtr<FJsonObject> Summary = BuildAssetSummary(Path);
+	ExtractCrashGuard::EndBatch();
 	if (!Summary.IsValid())
 	{
 		return MakeErrorResult(FString::Printf(TEXT("No asset found for %s"), *Path));
@@ -147,7 +237,10 @@ TSharedPtr<FJsonValue> FProjectIntelligenceHandlers::ExtractIndexSummaries(const
 		return MakeErrorResult(TEXT("Missing 'paths' array"));
 	}
 
+	ExtractCrashGuard::Initialize();
+
 	TArray<TSharedPtr<FJsonValue>> Summaries;
+	TArray<TSharedPtr<FJsonValue>> Skipped;
 	for (const TSharedPtr<FJsonValue>& PathValue : *Paths)
 	{
 		FString Path;
@@ -155,15 +248,26 @@ TSharedPtr<FJsonValue> FProjectIntelligenceHandlers::ExtractIndexSummaries(const
 		{
 			continue;
 		}
+		if (ExtractCrashGuard::IsSkipped(Path))
+		{
+			Skipped.Add(MakeShared<FJsonValueString>(Path));
+			continue;
+		}
+		ExtractCrashGuard::BeginAsset(Path);
 		TSharedPtr<FJsonObject> Summary = BuildAssetSummary(Path);
 		if (Summary.IsValid())
 		{
 			Summaries.Add(MakeShared<FJsonValueObject>(Summary));
 		}
 	}
+	ExtractCrashGuard::EndBatch();
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetArrayField(TEXT("summaries"), Summaries);
+	if (Skipped.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("skipped"), Skipped);
+	}
 	return MakeShared<FJsonValueObject>(Result);
 }
 

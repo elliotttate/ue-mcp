@@ -271,7 +271,13 @@ export class Indexer {
       .filter((r) => r.kind === "blueprint")
       .map((r) => toGamePath(r.relPath, this.projectName));
     if (bpPaths.length > 0) log(`extracting ${bpPaths.length} blueprint summaries`);
-    const bpSummaries = await extractBlueprintSummaries(this.bridge, bpPaths);
+    const bpSummaries = await extractBlueprintSummaries(this.bridge, bpPaths, undefined, (skipped) =>
+      log(
+        `${skipped.length} asset(s) on the crash-recovery skip list (Saved/UEMCP/extract_skip_list.txt): ` +
+          skipped.slice(0, 5).join(", ") +
+          (skipped.length > 5 ? ", ..." : ""),
+      ),
+    );
 
     // Build chunks for everything new or changed.
     const pending: PendingSource[] = [];

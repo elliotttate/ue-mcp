@@ -104,10 +104,14 @@ export async function extractBlueprintSummaries(
   // Small batches keep each call a short game-thread task; large batches exceed
   // the editor's per-call execution window and drop the bridge connection.
   batchSize = 25,
+  /** Called with assets the bridge refused because they crashed the editor
+   *  during a previous extraction (crash-recovery skip list). */
+  onSkipped?: (paths: string[]) => void,
 ): Promise<Map<string, BlueprintSummary>> {
   const out = new Map<string, BlueprintSummary>();
   if (!bridge.isConnected || gamePaths.length === 0) return out;
 
+  const crashSkipped = new Set<string>();
   let batchSupported = true;
   for (let i = 0; i < gamePaths.length && batchSupported; i += batchSize) {
     const slice = gamePaths.slice(i, i + batchSize);
@@ -117,6 +121,10 @@ export async function extractBlueprintSummaries(
     if (!res || typeof res !== "object") {
       batchSupported = false;
       break;
+    }
+    const skipped = (res as { skipped?: unknown }).skipped;
+    if (Array.isArray(skipped)) {
+      for (const s of skipped) if (typeof s === "string") crashSkipped.add(s);
     }
     const items = Array.isArray(res)
       ? res
@@ -137,12 +145,15 @@ export async function extractBlueprintSummaries(
     }
   }
 
-  // Per-asset fallback for anything not covered above.
+  // Per-asset fallback for anything not covered above. Crash-skipped assets are
+  // excluded: the bridge would refuse them again, and the per-asset composed
+  // fallback would re-run the exact loads that took the editor down.
   for (const gp of gamePaths) {
-    if (out.has(gp)) continue;
+    if (out.has(gp) || crashSkipped.has(gp)) continue;
     const s = await extractBlueprintSummary(bridge, gp);
     if (s) out.set(gp, s);
   }
+  if (crashSkipped.size > 0) onSkipped?.([...crashSkipped]);
   return out;
 }
 
