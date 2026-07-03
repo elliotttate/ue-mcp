@@ -122,6 +122,10 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// Kismet, anything user-defined). Pair with editor.invoke_function to
 	// drive GeometryScript ops from MCP without hand-writing each handler.
 	Registry.RegisterHandler(TEXT("list_function_libraries"), &ListFunctionLibraries);
+	// PIE test loop primitives (waiting is orchestrated server-side).
+	Registry.RegisterHandler(TEXT("simulate_pie_input"), &SimulatePieInput);
+	Registry.RegisterHandler(TEXT("check_pie_condition"), &CheckPieCondition);
+	Registry.RegisterHandler(TEXT("pie_line_trace"), &PieLineTrace);
 }
 
 TSharedPtr<FJsonValue> FEditorHandlers::ExecuteCommand(const TSharedPtr<FJsonObject>& Params)

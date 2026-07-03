@@ -3,6 +3,7 @@ import { categoryTool, bp, directive, type ToolDef, type ToolContext } from "../
 import { startEditor, stopEditor, restartEditor, buildProject } from "../editor-control.js";
 import { pushWorkaround, workaroundCount } from "../workaround-tracker.js";
 import { Vec3, Rotator } from "../schemas.js";
+import { McpError, ErrorCode } from "../errors.js";
 
 export const editorTool: ToolDef = categoryTool(
   "editor",
@@ -113,6 +114,26 @@ export const editorTool: ToolDef = categoryTool(
     invoke_static_function: bp("Call a static UFUNCTION on a UBlueprintFunctionLibrary (no actor instance). invoke_function needs an actor/component target; this targets the library class CDO instead, so it reaches static *_BlueprintOnly libraries (Voxel sculpt/query/stamp), GeometryScript, Kismet math, any function library. Params: className (short name or /Script/Module.Class path), functionName, args? (name -> JSON value, same marshalling as invoke_function), actorArgs? (name -> actor label for UObject* params that are actors, e.g. the sculpt actor), worldContextParam? (name of a UObject* param to fill with the editor/PIE world; auto-detected for params named WorldContextObject), world? (editor|pie). Returns return/out params under returnValues. Discover libraries + functions with list_function_libraries.", "invoke_static_function", (p) => ({ className: p.className, functionName: p.functionName, args: p.args, actorArgs: p.actorArgs, worldContextParam: p.worldContextParam, world: p.world })),
     list_function_libraries: bp("Enumerate UBlueprintFunctionLibrary subclasses on this build. Filter by name (case-insensitive substring, e.g. 'GeometryScript' / 'Kismet' / 'Animation'). Returns name, module, and (by default) every static BlueprintCallable function on the library with its tooltip. Use to discover what's available for editor.invoke_function (#455). Params: pattern?, includeFunctions?", "list_function_libraries", (p) => ({ pattern: p.pattern, includeFunctions: p.includeFunctions })),
     set_pie_time_scale: bp("Fast-forward PIE game time. Params: factor (>0). Raises WorldSettings caps and calls SetGlobalTimeDilation.", "set_pie_time_scale"),
+    simulate_input: bp("Inject a key/axis event into the running PIE session through the game viewport, flowing through the full input stack (PlayerInput, Enhanced Input, UMG focus) like hardware input. Params: key (FKey name: W, SpaceBar, LeftMouseButton, Gamepad_LeftX, ...), inputEvent? (tap|press|release, default tap), holdSeconds? (tap only: schedule the release N seconds later without blocking), amount? (analog depression 0-1, default 1), axisValue? (inject an IE_Axis sample with this value instead of a key event)", "simulate_pie_input", (p) => ({ key: p.key, event: p.inputEvent, holdSeconds: p.holdSeconds, amount: p.amount, axisValue: p.axisValue })),
+    check_pie_condition: bp("Evaluate one runtime condition against the PIE world once (no waiting). Conditions: pie_running | pie_stopped | actor_exists | actor_gone | actor_count (className?, expected, op?) | property (actorLabel, propertyName incl. dotted paths, expected, op? ==|!=|>|<|>=|<=|contains). Returns {met, value?, worldTimeSeconds}", "check_pie_condition", (p) => ({ condition: p.condition, actorLabel: p.actorLabel, actorPath: p.actorPath, className: p.className, propertyName: p.propertyName, expected: p.expected, op: p.op })),
+    pie_line_trace: bp("Line trace in the live PIE world. Params: start? [x,y,z], end? [x,y,z] - omit both to trace from the player camera forward (distance?, default 10000). channel? (Visibility|Camera|Pawn|WorldStatic|WorldDynamic|PhysicsBody). Returns hit actor/component/location/normal/distance", "pie_line_trace", (p) => ({ start: p.start, end: p.end, distance: p.distance, channel: p.traceChannel })),
+    wait_for_pie_event: {
+      description: "Poll a PIE condition until it holds or the timeout expires. Same condition params as check_pie_condition, plus timeoutMs? (default 30000) and intervalMs? (default 250). Waiting happens server-side; the editor never blocks. Returns {met, waitedMs, polls, value?}",
+      handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
+        return waitForPieCondition(ctx, p);
+      },
+    },
+    run_pie_test_sequence: {
+      description:
+        "Run a scripted PIE test: steps execute in order, waiting server-side between editor calls. Params: steps (array), stopOnFailure? (default true). Step forms: " +
+        "{do:'start_pie'} | {do:'stop_pie'} | {do:'input', key, inputEvent?, holdSeconds?, axisValue?} | {do:'wait', ms} | " +
+        "{do:'wait_for', condition..., timeoutMs?, intervalMs?} | {do:'assert', condition...} | {do:'console', command} | " +
+        "{do:'screenshot', filename?} | {do:'trace', start?, end?, channel?}. Returns {passed, steps[]} with per-step results",
+      timeoutMs: 600_000,
+      handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
+        return runPieTestSequence(ctx, p);
+      },
+    },
     hot_reload: bp("Hot reload C++", "hot_reload"),
     undo: bp("Undo last transaction", "undo"),
     redo: bp("Redo last transaction", "redo"),
@@ -232,5 +253,182 @@ export const editorTool: ToolDef = categoryTool(
     netMode: z.string().optional().describe("configure_pie: standalone | listen | client"),
     runUnderOneProcess: z.boolean().optional().describe("configure_pie: single-process flag"),
     launchSeparateServer: z.boolean().optional().describe("configure_pie: separate dedicated server"),
+    key: z.string().optional().describe("simulate_input: FKey name (W, SpaceBar, LeftMouseButton, Gamepad_LeftX, ...)"),
+    inputEvent: z.enum(["tap", "press", "release"]).optional().describe("simulate_input: key event kind (default tap)"),
+    holdSeconds: z.number().optional().describe("simulate_input tap: schedule the release N seconds later (non-blocking)"),
+    amount: z.number().optional().describe("simulate_input: analog depression 0-1 (default 1)"),
+    axisValue: z.number().optional().describe("simulate_input: inject an IE_Axis sample with this value instead of a key event"),
+    condition: z.string().optional().describe("PIE condition: pie_running | pie_stopped | actor_exists | actor_gone | actor_count | property"),
+    actorPath: z.string().optional().describe("PIE condition: actor path alternative to actorLabel"),
+    expected: z.union([z.number(), z.boolean(), z.string()]).optional().describe("PIE condition: expected value for property/actor_count"),
+    op: z.string().optional().describe("PIE condition comparison: == != > < >= <= contains (default ==)"),
+    timeoutMs: z.number().optional().describe("wait_for_pie_event: total wait budget (default 30000)"),
+    intervalMs: z.number().optional().describe("wait_for_pie_event: poll interval (default 250, min 100)"),
+    start: z.array(z.number()).optional().describe("pie_line_trace: trace start [x,y,z] (omit for player camera)"),
+    end: z.array(z.number()).optional().describe("pie_line_trace: trace end [x,y,z] (omit for camera-forward)"),
+    distance: z.number().optional().describe("pie_line_trace: camera-forward trace length (default 10000)"),
+    traceChannel: z.string().optional().describe("pie_line_trace: Visibility (default) | Camera | Pawn | WorldStatic | WorldDynamic | PhysicsBody"),
+    steps: z.array(z.record(z.unknown())).optional().describe("run_pie_test_sequence: ordered step list (see action description)"),
+    stopOnFailure: z.boolean().optional().describe("run_pie_test_sequence: stop at the first failed step (default true)"),
   },
 );
+
+/* ── PIE test-loop orchestration ─────────────────────────────────────
+ * Waiting lives here in the server: bridge handlers run on the editor's
+ * game thread and must never sleep, so wait_for_pie_event polls the
+ * single-tick check_pie_condition handler between engine ticks. */
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function pieConditionParams(p: Record<string, unknown>): Record<string, unknown> {
+  return {
+    condition: p.condition,
+    actorLabel: p.actorLabel,
+    actorPath: p.actorPath,
+    className: p.className,
+    propertyName: p.propertyName,
+    expected: p.expected,
+    op: p.op,
+  };
+}
+
+async function waitForPieCondition(ctx: ToolContext, p: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const timeoutMs = typeof p.timeoutMs === "number" ? p.timeoutMs : 30_000;
+  const intervalMs = Math.max(100, typeof p.intervalMs === "number" ? p.intervalMs : 250);
+  const startedAt = Date.now();
+  let polls = 0;
+  let last: unknown = null;
+  let lastError: string | null = null;
+
+  for (;;) {
+    polls++;
+    try {
+      last = await ctx.bridge.call("check_pie_condition", pieConditionParams(p));
+      lastError = null;
+      const obj = last as Record<string, unknown> | null;
+      if (obj && obj.met === true) {
+        return { met: true, waitedMs: Date.now() - startedAt, polls, value: obj.value, worldTimeSeconds: obj.worldTimeSeconds };
+      }
+    } catch (e) {
+      // Transient errors (actor not spawned yet -> property read fails) count
+      // as "not met yet"; the timeout bounds how long we keep trying.
+      lastError = e instanceof Error ? e.message : String(e);
+    }
+    if (Date.now() - startedAt + intervalMs > timeoutMs) {
+      return {
+        met: false,
+        timedOut: true,
+        waitedMs: Date.now() - startedAt,
+        polls,
+        last,
+        ...(lastError ? { lastError } : {}),
+      };
+    }
+    await sleep(intervalMs);
+  }
+}
+
+async function runPieTestSequence(ctx: ToolContext, p: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const steps = Array.isArray(p.steps) ? (p.steps as Record<string, unknown>[]) : null;
+  if (!steps || steps.length === 0) {
+    throw new McpError(ErrorCode.INVALID_PARAMS, "run_pie_test_sequence requires a non-empty 'steps' array");
+  }
+  const stopOnFailure = p.stopOnFailure !== false;
+
+  const results: Record<string, unknown>[] = [];
+  let passed = true;
+
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    const kind = String(step.do ?? step.action ?? "");
+    const record: Record<string, unknown> = { index: i, do: kind };
+    try {
+      switch (kind) {
+        case "start_pie": {
+          await ctx.bridge.call("pie_control", { action: "start" }, 200_000);
+          const wait = await waitForPieCondition(ctx, {
+            condition: "pie_running",
+            timeoutMs: typeof step.timeoutMs === "number" ? step.timeoutMs : 60_000,
+          });
+          record.ok = wait.met === true;
+          record.detail = wait;
+          break;
+        }
+        case "stop_pie": {
+          await ctx.bridge.call("pie_control", { action: "stop" });
+          const wait = await waitForPieCondition(ctx, { condition: "pie_stopped", timeoutMs: 15_000 });
+          record.ok = wait.met === true;
+          record.detail = wait;
+          break;
+        }
+        case "input": {
+          record.detail = await ctx.bridge.call("simulate_pie_input", {
+            key: step.key,
+            event: step.inputEvent ?? step.event,
+            holdSeconds: step.holdSeconds,
+            amount: step.amount,
+            axisValue: step.axisValue,
+          });
+          record.ok = true;
+          break;
+        }
+        case "wait": {
+          const ms = typeof step.ms === "number" ? step.ms : (typeof step.seconds === "number" ? step.seconds * 1000 : 1000);
+          await sleep(Math.min(ms, 120_000));
+          record.ok = true;
+          break;
+        }
+        case "wait_for": {
+          const wait = await waitForPieCondition(ctx, step);
+          record.ok = wait.met === true;
+          record.detail = wait;
+          break;
+        }
+        case "assert": {
+          const check = (await ctx.bridge.call("check_pie_condition", pieConditionParams(step))) as Record<string, unknown>;
+          record.ok = check?.met === true;
+          record.detail = check;
+          break;
+        }
+        case "console": {
+          record.detail = await ctx.bridge.call("execute_command", { command: step.command });
+          record.ok = true;
+          break;
+        }
+        case "screenshot": {
+          record.detail = await ctx.bridge.call("capture_screenshot", { filename: step.filename, target: "pie" });
+          record.ok = true;
+          break;
+        }
+        case "trace": {
+          const trace = (await ctx.bridge.call("pie_line_trace", {
+            start: step.start,
+            end: step.end,
+            distance: step.distance,
+            channel: step.channel ?? step.traceChannel,
+          })) as Record<string, unknown>;
+          record.detail = trace;
+          // A trace step with expectHit set becomes an assertion.
+          record.ok = step.expectHit === undefined ? true : trace?.hit === step.expectHit;
+          break;
+        }
+        default:
+          record.ok = false;
+          record.detail = `Unknown step kind '${kind}'. Expected start_pie, stop_pie, input, wait, wait_for, assert, console, screenshot, or trace.`;
+      }
+    } catch (e) {
+      record.ok = false;
+      record.detail = e instanceof Error ? e.message : String(e);
+    }
+
+    results.push(record);
+    if (record.ok !== true) {
+      passed = false;
+      if (stopOnFailure) break;
+    }
+  }
+
+  return { passed, completedSteps: results.length, totalSteps: steps.length, steps: results };
+}

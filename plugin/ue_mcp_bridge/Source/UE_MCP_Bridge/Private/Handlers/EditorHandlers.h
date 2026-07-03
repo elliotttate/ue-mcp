@@ -174,4 +174,11 @@ private:
 	// Kismet*, AnimationLibrary, user-defined) so invoke_function callers
 	// can find the libraries that expose the ops they want.
 	static TSharedPtr<FJsonValue> ListFunctionLibraries(const TSharedPtr<FJsonObject>& Params);
+
+	// PIE test loop primitives. Deliberately single-tick (never sleep or poll):
+	// handlers run on the game thread, so waiting is orchestrated by the TS
+	// server (editor wait_for_pie_event / run_pie_test_sequence) around these.
+	static TSharedPtr<FJsonValue> SimulatePieInput(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> CheckPieCondition(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> PieLineTrace(const TSharedPtr<FJsonObject>& Params);
 };

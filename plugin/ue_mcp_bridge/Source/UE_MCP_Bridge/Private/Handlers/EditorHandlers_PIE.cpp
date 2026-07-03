@@ -30,6 +30,16 @@
 #include "Dom/JsonValue.h"
 #include "Settings/LevelEditorPlaySettings.h"
 
+// PIE test loop primitives (simulate_pie_input / check_pie_condition / pie_line_trace)
+#include "Engine/GameViewportClient.h"
+#include "InputKeyEventArgs.h"
+#include "InputCoreTypes.h"
+#include "GenericPlatform/GenericPlatformInputDeviceMapper.h"
+#include "Components/PrimitiveComponent.h"
+#include "Containers/Ticker.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
+
 namespace
 {
 	static ULevelEditorPlaySettings* GetPlaySettingsForRW()
@@ -1212,5 +1222,338 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetPieConfig(const TSharedPtr<FJsonObjec
 	Result->SetStringField(TEXT("netMode"), NetModeNameFromValue(GetEnumPropOn(Settings, TEXT("PlayNetMode"))));
 	Result->SetBoolField(TEXT("runUnderOneProcess"), GetBoolPropOn(Settings, TEXT("RunUnderOneProcess"), true));
 	Result->SetBoolField(TEXT("launchSeparateServer"), GetBoolPropOn(Settings, TEXT("bLaunchSeparateServer"), false));
+	return MCPResult(Result);
+}
+
+
+// ─── PIE test loop primitives ───────────────────────────────────────────
+// These never sleep or poll: handlers run on the game thread, so the TS
+// server drives waiting (editor wait_for_pie_event / run_pie_test_sequence)
+// by calling check_pie_condition repeatedly between ticks.
+
+// Inject a key/axis event into the running PIE session through the game
+// viewport, so it flows through the full input stack (PlayerInput, Enhanced
+// Input, UMG focus) exactly like hardware input.
+TSharedPtr<FJsonValue> FEditorHandlers::SimulatePieInput(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!GEditor || GEditor->PlayWorld == nullptr)
+	{
+		return MCPError(TEXT("PIE is not active. Start a PIE session first (editor play_in_editor pieAction=start)."));
+	}
+	UWorld* PIEWorld = GEditor->PlayWorld;
+	UGameViewportClient* Viewport = PIEWorld->GetGameViewport();
+	if (!Viewport)
+	{
+		return MCPError(TEXT("PIE world has no game viewport (dedicated-server PIE client?)"));
+	}
+
+	FString KeyName;
+	if (auto Err = RequireString(Params, TEXT("key"), KeyName)) return Err;
+	const FKey Key(*KeyName);
+	if (!Key.IsValid())
+	{
+		return MCPError(FString::Printf(TEXT("Unknown key '%s'. Use FKey names: W, SpaceBar, LeftMouseButton, Gamepad_LeftX, ..."), *KeyName));
+	}
+
+	const FString Event = OptionalString(Params, TEXT("event"), TEXT("tap"));
+	const double Amount = OptionalNumber(Params, TEXT("amount"), 1.0);
+	const double HoldSeconds = OptionalNumber(Params, TEXT("holdSeconds"), 0.0);
+	const FInputDeviceId Device = IPlatformInputDeviceMapper::Get().GetDefaultInputDevice();
+
+	auto Inject = [&](EInputEvent InputEvent, float InAmount) -> bool
+	{
+		FInputKeyEventArgs Args = FInputKeyEventArgs::CreateSimulated(
+			Key, InputEvent, InAmount, /*NumSamplesOverride*/ -1, Device, /*bIsTouchEvent*/ false, Viewport->Viewport);
+		return Viewport->InputKey(Args);
+	};
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("key"), KeyName);
+	Result->SetStringField(TEXT("event"), Event);
+
+	if (Params->HasField(TEXT("axisValue")))
+	{
+		const double AxisValue = OptionalNumber(Params, TEXT("axisValue"), 0.0);
+		FInputKeyEventArgs Args = FInputKeyEventArgs::CreateSimulated(
+			Key, IE_Axis, static_cast<float>(AxisValue), /*NumSamplesOverride*/ 1, Device, false, Viewport->Viewport);
+		const bool bConsumed = Viewport->InputAxis(Args);
+		Result->SetBoolField(TEXT("consumed"), bConsumed);
+		Result->SetNumberField(TEXT("axisValue"), AxisValue);
+		return MCPResult(Result);
+	}
+
+	if (Event == TEXT("press"))
+	{
+		Result->SetBoolField(TEXT("consumed"), Inject(IE_Pressed, static_cast<float>(Amount)));
+	}
+	else if (Event == TEXT("release"))
+	{
+		Result->SetBoolField(TEXT("consumed"), Inject(IE_Released, 0.0f));
+	}
+	else if (Event == TEXT("tap"))
+	{
+		const bool bConsumed = Inject(IE_Pressed, static_cast<float>(Amount));
+		if (HoldSeconds > 0.0)
+		{
+			// Release later without blocking: one-shot ticker keyed to the PIE
+			// world so a stopped session never receives the stale release.
+			const FKey HeldKey = Key;
+			TWeakObjectPtr<UWorld> WeakWorld(PIEWorld);
+			FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
+				[HeldKey, WeakWorld, Device](float) -> bool
+				{
+					if (GEditor && GEditor->PlayWorld && GEditor->PlayWorld == WeakWorld.Get())
+					{
+						if (UGameViewportClient* GVC = GEditor->PlayWorld->GetGameViewport())
+						{
+							FInputKeyEventArgs Args = FInputKeyEventArgs::CreateSimulated(
+								HeldKey, IE_Released, 0.0f, -1, Device, false, GVC->Viewport);
+							GVC->InputKey(Args);
+						}
+					}
+					return false;
+				}), static_cast<float>(HoldSeconds));
+			Result->SetNumberField(TEXT("releaseScheduledInSeconds"), HoldSeconds);
+		}
+		else
+		{
+			Inject(IE_Released, 0.0f);
+		}
+		Result->SetBoolField(TEXT("consumed"), bConsumed);
+	}
+	else
+	{
+		return MCPError(FString::Printf(TEXT("Unknown event '%s'. Expected press, release, or tap."), *Event));
+	}
+	return MCPResult(Result);
+}
+
+// Evaluate one runtime condition against the PIE world and return whether it
+// currently holds. The TS server polls this to implement wait_for_pie_event.
+TSharedPtr<FJsonValue> FEditorHandlers::CheckPieCondition(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Condition;
+	if (auto Err = RequireString(Params, TEXT("condition"), Condition)) return Err;
+
+	const bool bPlaying = GEditor && GEditor->PlayWorld != nullptr;
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("condition"), Condition);
+	Result->SetBoolField(TEXT("isPlaying"), bPlaying);
+	if (bPlaying)
+	{
+		Result->SetNumberField(TEXT("worldTimeSeconds"), GEditor->PlayWorld->GetTimeSeconds());
+	}
+
+	if (Condition == TEXT("pie_running"))
+	{
+		Result->SetBoolField(TEXT("met"), bPlaying);
+		return MCPResult(Result);
+	}
+	if (Condition == TEXT("pie_stopped"))
+	{
+		Result->SetBoolField(TEXT("met"), !bPlaying);
+		return MCPResult(Result);
+	}
+	if (!bPlaying)
+	{
+		// Not an error: a poller waiting on an actor condition before PIE
+		// finishes booting should just see "not met yet".
+		Result->SetBoolField(TEXT("met"), false);
+		Result->SetStringField(TEXT("note"), TEXT("PIE not running"));
+		return MCPResult(Result);
+	}
+
+	UWorld* PIEWorld = GEditor->PlayWorld;
+
+	if (Condition == TEXT("actor_exists") || Condition == TEXT("actor_gone"))
+	{
+		FString ActorToken;
+		if (!Params->TryGetStringField(TEXT("actorLabel"), ActorToken) &&
+			!Params->TryGetStringField(TEXT("actorPath"), ActorToken))
+		{
+			return MCPError(TEXT("Missing 'actorLabel' (or 'actorPath')"));
+		}
+		AActor* Found = FindActorByLabelNameOrPath(PIEWorld, ActorToken);
+		const bool bExists = IsValid(Found);
+		Result->SetBoolField(TEXT("met"), Condition == TEXT("actor_exists") ? bExists : !bExists);
+		return MCPResult(Result);
+	}
+
+	if (Condition == TEXT("actor_count"))
+	{
+		FString ClassName;
+		UClass* FilterClass = AActor::StaticClass();
+		if (Params->TryGetStringField(TEXT("className"), ClassName) && !ClassName.IsEmpty())
+		{
+			FilterClass = FindClassByShortName(ClassName);
+			if (!FilterClass) FilterClass = LoadClass<AActor>(nullptr, *ClassName);
+			if (!FilterClass) return MCPError(FString::Printf(TEXT("Class not found: %s"), *ClassName));
+		}
+		int32 Count = 0;
+		for (TActorIterator<AActor> It(PIEWorld, FilterClass); It; ++It) Count++;
+		const double Expected = OptionalNumber(Params, TEXT("expected"), 0.0);
+		const FString Op = OptionalString(Params, TEXT("op"), TEXT(">="));
+		bool bMet = false;
+		if (Op == TEXT("==")) bMet = Count == static_cast<int32>(Expected);
+		else if (Op == TEXT("!=")) bMet = Count != static_cast<int32>(Expected);
+		else if (Op == TEXT(">")) bMet = Count > Expected;
+		else if (Op == TEXT("<")) bMet = Count < Expected;
+		else if (Op == TEXT("<=")) bMet = Count <= Expected;
+		else bMet = Count >= Expected;
+		Result->SetBoolField(TEXT("met"), bMet);
+		Result->SetNumberField(TEXT("count"), Count);
+		return MCPResult(Result);
+	}
+
+	if (Condition == TEXT("property"))
+	{
+		// Reuse the dotted-path property reader, then compare its value.
+		TSharedPtr<FJsonValue> ReadResult = PieGetRuntimeValue(Params);
+		const TSharedPtr<FJsonObject>* ReadObj = nullptr;
+		if (!ReadResult.IsValid() || !ReadResult->TryGetObject(ReadObj) || !ReadObj->IsValid())
+		{
+			return MCPError(TEXT("Property read failed"));
+		}
+		bool bReadOk = false;
+		(*ReadObj)->TryGetBoolField(TEXT("success"), bReadOk);
+		if (!bReadOk)
+		{
+			// Propagate the read error (actor not found etc.) - the poller
+			// treats hard errors as fatal, unlike met=false.
+			return ReadResult;
+		}
+		TSharedPtr<FJsonValue> Current = (*ReadObj)->TryGetField(TEXT("value"));
+		if (!Current.IsValid())
+		{
+			return MCPError(TEXT("Property read returned no value"));
+		}
+
+		const FString Op = OptionalString(Params, TEXT("op"), TEXT("=="));
+		bool bMet = false;
+		double ExpectedNum = 0.0, CurrentNum = 0.0;
+		bool bExpectedBool = false;
+		FString ExpectedStr;
+		if (Params->TryGetNumberField(TEXT("expected"), ExpectedNum) && Current->TryGetNumber(CurrentNum))
+		{
+			if (Op == TEXT("==")) bMet = FMath::IsNearlyEqual(CurrentNum, ExpectedNum, UE_KINDA_SMALL_NUMBER);
+			else if (Op == TEXT("!=")) bMet = !FMath::IsNearlyEqual(CurrentNum, ExpectedNum, UE_KINDA_SMALL_NUMBER);
+			else if (Op == TEXT(">")) bMet = CurrentNum > ExpectedNum;
+			else if (Op == TEXT("<")) bMet = CurrentNum < ExpectedNum;
+			else if (Op == TEXT(">=")) bMet = CurrentNum >= ExpectedNum;
+			else if (Op == TEXT("<=")) bMet = CurrentNum <= ExpectedNum;
+			else return MCPError(FString::Printf(TEXT("Unknown op '%s' for numeric compare"), *Op));
+		}
+		else if (Params->TryGetBoolField(TEXT("expected"), bExpectedBool))
+		{
+			bool bCurrentBool = false;
+			Current->TryGetBool(bCurrentBool);
+			bMet = (Op == TEXT("!=")) ? (bCurrentBool != bExpectedBool) : (bCurrentBool == bExpectedBool);
+		}
+		else if (Params->TryGetStringField(TEXT("expected"), ExpectedStr))
+		{
+			FString CurrentStr;
+			if (!Current->TryGetString(CurrentStr))
+			{
+				// Complex value (struct/array): compare against its JSON dump.
+				TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&CurrentStr);
+				FJsonSerializer::Serialize(Current, TEXT(""), Writer);
+			}
+			if (Op == TEXT("contains")) bMet = CurrentStr.Contains(ExpectedStr);
+			else if (Op == TEXT("!=")) bMet = !CurrentStr.Equals(ExpectedStr, ESearchCase::IgnoreCase);
+			else bMet = CurrentStr.Equals(ExpectedStr, ESearchCase::IgnoreCase);
+		}
+		else
+		{
+			return MCPError(TEXT("Missing 'expected' (number, bool, or string)"));
+		}
+
+		Result->SetBoolField(TEXT("met"), bMet);
+		Result->SetField(TEXT("value"), Current);
+		return MCPResult(Result);
+	}
+
+	return MCPError(FString::Printf(
+		TEXT("Unknown condition '%s'. Expected pie_running, pie_stopped, actor_exists, actor_gone, actor_count, or property."), *Condition));
+}
+
+// Line trace in the live PIE world - lets a test verify what is physically
+// in front of the player without screenshot interpretation.
+TSharedPtr<FJsonValue> FEditorHandlers::PieLineTrace(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!GEditor || GEditor->PlayWorld == nullptr)
+	{
+		return MCPError(TEXT("PIE is not active. Start a PIE session first."));
+	}
+	UWorld* PIEWorld = GEditor->PlayWorld;
+
+	auto ReadVector = [&Params](const TCHAR* Field, FVector& Out) -> bool
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+		if (!Params->TryGetArrayField(Field, Arr) || !Arr || Arr->Num() != 3) return false;
+		Out.X = (*Arr)[0]->AsNumber();
+		Out.Y = (*Arr)[1]->AsNumber();
+		Out.Z = (*Arr)[2]->AsNumber();
+		return true;
+	};
+
+	FVector Start, End;
+	const bool bHasStart = ReadVector(TEXT("start"), Start);
+	const bool bHasEnd = ReadVector(TEXT("end"), End);
+
+	// fromPawn=true (or no start given): trace from the player camera forward.
+	if (!bHasStart || !bHasEnd)
+	{
+		APlayerController* PC = UGameplayStatics::GetPlayerController(PIEWorld, 0);
+		if (!PC)
+		{
+			return MCPError(TEXT("Pass start[3] and end[3], or ensure a player controller exists for a camera-forward trace"));
+		}
+		FVector CamLoc;
+		FRotator CamRot;
+		PC->GetPlayerViewPoint(CamLoc, CamRot);
+		const double Distance = OptionalNumber(Params, TEXT("distance"), 10000.0);
+		if (!bHasStart) Start = CamLoc;
+		if (!bHasEnd) End = Start + CamRot.Vector() * Distance;
+	}
+
+	const FString ChannelName = OptionalString(Params, TEXT("channel"), TEXT("Visibility"));
+	ECollisionChannel Channel = ECC_Visibility;
+	if (ChannelName.Equals(TEXT("Camera"), ESearchCase::IgnoreCase)) Channel = ECC_Camera;
+	else if (ChannelName.Equals(TEXT("Pawn"), ESearchCase::IgnoreCase)) Channel = ECC_Pawn;
+	else if (ChannelName.Equals(TEXT("WorldStatic"), ESearchCase::IgnoreCase)) Channel = ECC_WorldStatic;
+	else if (ChannelName.Equals(TEXT("WorldDynamic"), ESearchCase::IgnoreCase)) Channel = ECC_WorldDynamic;
+	else if (ChannelName.Equals(TEXT("PhysicsBody"), ESearchCase::IgnoreCase)) Channel = ECC_PhysicsBody;
+
+	FHitResult Hit;
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(MCPPieLineTrace), /*bTraceComplex*/ false);
+	const bool bHit = PIEWorld->LineTraceSingleByChannel(Hit, Start, End, Channel, QueryParams);
+
+	auto Result = MCPSuccess();
+	Result->SetBoolField(TEXT("hit"), bHit);
+	auto VecToArray = [](const FVector& V)
+	{
+		TArray<TSharedPtr<FJsonValue>> A;
+		A.Add(MakeShared<FJsonValueNumber>(V.X));
+		A.Add(MakeShared<FJsonValueNumber>(V.Y));
+		A.Add(MakeShared<FJsonValueNumber>(V.Z));
+		return A;
+	};
+	Result->SetArrayField(TEXT("start"), VecToArray(Start));
+	Result->SetArrayField(TEXT("end"), VecToArray(End));
+	if (bHit)
+	{
+		if (AActor* HitActor = Hit.GetActor())
+		{
+			Result->SetStringField(TEXT("actorLabel"), HitActor->GetActorLabel());
+			Result->SetStringField(TEXT("actorClass"), HitActor->GetClass()->GetName());
+		}
+		if (UPrimitiveComponent* HitComp = Hit.GetComponent())
+		{
+			Result->SetStringField(TEXT("component"), HitComp->GetName());
+		}
+		Result->SetArrayField(TEXT("location"), VecToArray(Hit.Location));
+		Result->SetArrayField(TEXT("normal"), VecToArray(Hit.Normal));
+		Result->SetNumberField(TEXT("distance"), Hit.Distance);
+	}
 	return MCPResult(Result);
 }
