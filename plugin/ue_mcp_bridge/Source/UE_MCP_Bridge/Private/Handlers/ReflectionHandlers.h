@@ -20,8 +20,14 @@ private:
 	static TSharedPtr<FJsonValue> CreateGameplayTag(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CreateEnum(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetEnumEntries(const TSharedPtr<FJsonObject>& Params);
+	// Live reflected-API search — find BlueprintCallable/Pure UFunctions by
+	// keyword across name, params, return type, owning class, tooltip.
+	static TSharedPtr<FJsonValue> SearchFunctions(const TSharedPtr<FJsonObject>& Params);
 
-	// UserDefinedStruct authoring — the datatable/blueprint-variable building block.
+	// UserDefinedStruct authoring — the datatable/blueprint-variable building
+	// block. Members accept {name, type, default?, tooltip?, isArray?} under a
+	// 'members', 'fields', or 'variables' array (set_struct_fields is an alias
+	// action from the parallel implementation this one absorbed).
 	static TSharedPtr<FJsonValue> CreateStruct(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetStructMembers(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadStructMembers(const TSharedPtr<FJsonObject>& Params);

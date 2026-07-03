@@ -41,7 +41,10 @@ void FReflectionHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("set_enum_entries"), &SetEnumEntries);
 	Registry.RegisterHandler(TEXT("create_struct"), &CreateStruct);
 	Registry.RegisterHandler(TEXT("set_struct_members"), &SetStructMembers);
+	// Alias kept from the parallel struct implementation this one absorbed.
+	Registry.RegisterHandler(TEXT("set_struct_fields"), &SetStructMembers);
 	Registry.RegisterHandler(TEXT("read_struct_members"), &ReadStructMembers);
+	Registry.RegisterHandler(TEXT("search_functions"), &SearchFunctions);
 }
 
 namespace
@@ -759,6 +762,15 @@ namespace
 			return false;
 		}
 
+		// isArray:true (the wire shape of the parallel implementation this one
+		// absorbed) is sugar for the array: container prefix.
+		bool bIsArray = false;
+		if (Member->TryGetBoolField(TEXT("isArray"), bIsArray) && bIsArray &&
+			!TypeStr.StartsWith(TEXT("array:"), ESearchCase::IgnoreCase))
+		{
+			TypeStr = TEXT("array:") + TypeStr;
+		}
+
 		const FEdGraphPinType PinType = FBlueprintHandlers::MakePinType(TypeStr);
 		if (PinType.PinCategory == NAME_None)
 		{
@@ -852,9 +864,18 @@ TSharedPtr<FJsonValue> FReflectionHandlers::CreateStruct(const TSharedPtr<FJsonO
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
 	const TArray<TSharedPtr<FJsonValue>>* MembersArr = nullptr;
-	if (!Params->TryGetArrayField(TEXT("members"), MembersArr) || !MembersArr || MembersArr->Num() == 0)
+	if (!Params->TryGetArrayField(TEXT("members"), MembersArr))
 	{
-		return MCPError(TEXT("Missing 'members' (non-empty array of {name, type, default?, tooltip?})"));
+		// 'fields' / 'variables' are the wire names of the parallel struct
+		// implementation this handler absorbed.
+		if (!Params->TryGetArrayField(TEXT("fields"), MembersArr))
+		{
+			Params->TryGetArrayField(TEXT("variables"), MembersArr);
+		}
+	}
+	if (!MembersArr || MembersArr->Num() == 0)
+	{
+		return MCPError(TEXT("Missing 'members' (non-empty array of {name, type, default?, tooltip?, isArray?}; 'fields'/'variables' accepted as aliases)"));
 	}
 
 	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("UserDefinedStruct")))
@@ -939,9 +960,18 @@ TSharedPtr<FJsonValue> FReflectionHandlers::SetStructMembers(const TSharedPtr<FJ
 	if (!Struct) return MCPError(FString::Printf(TEXT("UserDefinedStruct not found: %s"), *AssetPath));
 
 	const TArray<TSharedPtr<FJsonValue>>* MembersArr = nullptr;
-	if (!Params->TryGetArrayField(TEXT("members"), MembersArr) || !MembersArr || MembersArr->Num() == 0)
+	if (!Params->TryGetArrayField(TEXT("members"), MembersArr))
 	{
-		return MCPError(TEXT("Missing 'members' (non-empty array of {name, type, default?, tooltip?})"));
+		// 'fields' / 'variables' are the wire names of the parallel struct
+		// implementation this handler absorbed.
+		if (!Params->TryGetArrayField(TEXT("fields"), MembersArr))
+		{
+			Params->TryGetArrayField(TEXT("variables"), MembersArr);
+		}
+	}
+	if (!MembersArr || MembersArr->Num() == 0)
+	{
+		return MCPError(TEXT("Missing 'members' (non-empty array of {name, type, default?, tooltip?, isArray?}; 'fields'/'variables' accepted as aliases)"));
 	}
 
 	TArray<FGuid> OldGuids;
@@ -1005,4 +1035,129 @@ TSharedPtr<FJsonValue> FReflectionHandlers::ReadStructMembers(const TSharedPtr<F
 	if (!Struct) return MCPError(FString::Printf(TEXT("UserDefinedStruct not found: %s"), *AssetPath));
 
 	return DescribeStructMembers(Struct);
+}
+// ─── search_functions ──────────────────────────────────────────────────
+// Live reflected-API search: rank BlueprintCallable/Pure UFunctions by how
+// well they match the query keywords across function name, parameter names/
+// types, return type, owning class, and Keywords metadata. Replaces the
+// static api_cheatsheet approach with always-current engine reflection so
+// agents can discover correct function/class names before authoring logic.
+TSharedPtr<FJsonValue> FReflectionHandlers::SearchFunctions(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Query;
+	if (auto Err = RequireString(Params, TEXT("query"), Query)) return Err;
+
+	int32 Limit = OptionalInt(Params, TEXT("limit"), 20);
+	if (Limit <= 0) Limit = 20;
+	Limit = FMath::Min(Limit, 100);
+
+	const FString ClassFilter = OptionalString(Params, TEXT("classFilter"));
+	UClass* FilterClass = nullptr;
+	if (!ClassFilter.IsEmpty())
+	{
+		FilterClass = FindClass(ClassFilter);
+		if (!FilterClass) return MCPError(FString::Printf(TEXT("classFilter not found: %s"), *ClassFilter));
+	}
+
+	// Tokenize the query into lowercased word/_ runs.
+	TArray<FString> Keywords;
+	{
+		FString Cur;
+		for (const TCHAR C : Query.ToLower())
+		{
+			if (FChar::IsAlnum(C) || C == TEXT('_')) { Cur.AppendChar(C); }
+			else if (!Cur.IsEmpty()) { Keywords.Add(Cur); Cur.Empty(); }
+		}
+		if (!Cur.IsEmpty()) Keywords.Add(Cur);
+	}
+	if (Keywords.Num() == 0) return MCPError(TEXT("query had no searchable keywords"));
+
+	struct FScored { int32 Score; UFunction* Func; };
+	TArray<FScored> Scored;
+
+	auto ScoreFunc = [&Keywords](UFunction* Func, UClass* Owner) -> int32
+	{
+		const FString FuncName = Func->GetName().ToLower();
+		const FString OwnerName = Owner ? Owner->GetName().ToLower() : FString();
+		FString ParamText;
+		FString ReturnText;
+		for (TFieldIterator<FProperty> PIt(Func); PIt; ++PIt)
+		{
+			FProperty* P = *PIt;
+			if (P->PropertyFlags & CPF_ReturnParm) { ReturnText += P->GetCPPType().ToLower(); }
+			else { ParamText += P->GetName().ToLower() + TEXT(" ") + P->GetCPPType().ToLower() + TEXT(" "); }
+		}
+#if WITH_EDITOR
+		const FString MetaKeywords = Func->GetMetaData(TEXT("Keywords")).ToLower();
+#else
+		const FString MetaKeywords;
+#endif
+		int32 Score = 0;
+		bool bNameHit = false;
+		for (const FString& K : Keywords)
+		{
+			if (FuncName.Contains(K))                            { Score += 3; bNameHit = true; }
+			if (!OwnerName.IsEmpty() && OwnerName.Contains(K))   Score += 1;
+			if (ParamText.Contains(K))                           Score += 1;
+			if (ReturnText.Contains(K))                          Score += 1;
+			if (!MetaKeywords.IsEmpty() && MetaKeywords.Contains(K)) Score += 1;
+		}
+		// Require at least one keyword in the function name so results stay
+		// relevant (GetActorLocation, not an unrelated function that merely
+		// mentions "actor" in a parameter).
+		return bNameHit ? Score : 0;
+	};
+
+	auto Consider = [&](UFunction* Func, UClass* Owner)
+	{
+		if (!Func) return;
+		if (!(Func->FunctionFlags & (FUNC_BlueprintCallable | FUNC_BlueprintPure))) return;
+		const int32 S = ScoreFunc(Func, Owner);
+		if (S > 0) Scored.Add({ S, Func });
+	};
+
+	if (FilterClass)
+	{
+		// Functions declared on the class plus everything it inherits.
+		for (TFieldIterator<UFunction> FIt(FilterClass, EFieldIteratorFlags::IncludeSuper); FIt; ++FIt)
+		{
+			Consider(*FIt, FilterClass);
+		}
+	}
+	else
+	{
+		// Global scan. ExcludeSuper so an inherited function is only scored once
+		// at the class that declares it.
+		for (TObjectIterator<UClass> CIt; CIt; ++CIt)
+		{
+			UClass* C = *CIt;
+			for (TFieldIterator<UFunction> FIt(C, EFieldIteratorFlags::ExcludeSuper); FIt; ++FIt)
+			{
+				Consider(*FIt, C);
+			}
+		}
+	}
+
+	Scored.Sort([](const FScored& A, const FScored& B) { return A.Score > B.Score; });
+
+	TArray<TSharedPtr<FJsonValue>> Results;
+	for (int32 i = 0; i < Scored.Num() && Results.Num() < Limit; ++i)
+	{
+		UFunction* Func = Scored[i].Func;
+		TSharedPtr<FJsonObject> Meta = SerializeFunctionMeta(Func);
+		UClass* Owner = Func->GetOwnerClass();
+		if (Owner) Meta->SetStringField(TEXT("class"), Owner->GetName());
+		Meta->SetStringField(TEXT("signature"),
+			FString::Printf(TEXT("%s::%s"), Owner ? *Owner->GetName() : TEXT("?"), *Func->GetName()));
+		Meta->SetNumberField(TEXT("score"), Scored[i].Score);
+		Results.Add(MakeShared<FJsonValueObject>(Meta));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("query"), Query);
+	if (FilterClass) Result->SetStringField(TEXT("classFilter"), FilterClass->GetName());
+	Result->SetArrayField(TEXT("functions"), Results);
+	Result->SetNumberField(TEXT("count"), Results.Num());
+	Result->SetNumberField(TEXT("totalMatches"), Scored.Num());
+	return MCPResult(Result);
 }

@@ -79,6 +79,8 @@ private:
 
 	// Control Rig (#11)
 	static TSharedPtr<FJsonValue> ListControlRigVariables(const TSharedPtr<FJsonObject>& Params);
+	// #619 per-element Control Rig hierarchy metadata (name, type, index, parent)
+	static TSharedPtr<FJsonValue> ReadControlRigHierarchy(const TSharedPtr<FJsonObject>& Params);
 
 	// Control Rig authoring (AnimationHandlers_ControlRig.cpp): hierarchy
 	// (bones/controls) via URigHierarchyController, RigVM graph via
