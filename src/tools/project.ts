@@ -637,10 +637,49 @@ export const projectTool: ToolDef = categoryTool(
         };
       },
     },
+    list_ue_plugins: bp("Enumerate Unreal plugins discovered for this project (engine + project) with enabled state. VR setup starts here: filter='XR' shows OpenXR and friends. Params: filter? (name/category substring), enabledOnly?", "list_unreal_plugins", (p) => ({ filter: p.filter, enabledOnly: p.enabledOnly })),
+    set_ue_plugin_enabled: {
+      description:
+        "Enable or disable an Unreal plugin in the .uproject (e.g. OpenXR for VR). Edits the Plugins array on disk; " +
+        "takes effect on next editor start (restart_editor to apply). Params: pluginName, enabled? (default true)",
+      handler: async (ctx, p) => {
+        ctx.project.ensureLoaded();
+        const pluginName = String(p.pluginName ?? "");
+        if (!pluginName) throw new Error("pluginName is required");
+        const enabled = p.enabled !== false;
+
+        const uprojectPath = ctx.project.projectPath!;
+        const root = JSON.parse(fs.readFileSync(uprojectPath, "utf-8")) as { Plugins?: Array<{ Name: string; Enabled: boolean }> };
+        if (!root.Plugins) root.Plugins = [];
+        const existing = root.Plugins.find((pl) => pl?.Name === pluginName);
+        let changed: boolean;
+        if (existing) {
+          changed = existing.Enabled !== enabled;
+          existing.Enabled = enabled;
+        } else {
+          root.Plugins.push({ Name: pluginName, Enabled: enabled });
+          changed = true;
+        }
+        if (changed) {
+          fs.writeFileSync(uprojectPath, JSON.stringify(root, null, "\t"));
+        }
+        return {
+          pluginName,
+          enabled,
+          changed,
+          restartRequired: changed,
+          hint: changed ? "Restart the editor (editor restart_editor) for the plugin change to take effect." : "Already in the requested state.",
+        };
+      },
+    },
   },
   undefined,
   {
     projectPath: z.string().optional().describe("For set_project: path to .uproject"),
+    filter: z.string().optional().describe("list_ue_plugins: name/category substring (e.g. 'XR')"),
+    enabledOnly: z.boolean().optional().describe("list_ue_plugins: only plugins currently enabled"),
+    pluginName: z.string().optional().describe("set_ue_plugin_enabled: plugin name (e.g. 'OpenXR')"),
+    enabled: z.boolean().optional().describe("set_ue_plugin_enabled: target state (default true)"),
     configName: z.string().optional().describe("For read_config/set_config: config file name"),
     query: z.string().optional().describe("For search_config/search_cpp: search text"),
     headerPath: z.string().optional().describe("For read_cpp_header: path to .h file"),

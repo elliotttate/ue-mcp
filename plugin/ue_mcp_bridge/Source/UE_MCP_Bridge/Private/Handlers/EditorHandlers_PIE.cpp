@@ -40,6 +40,11 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
+// VR Preview PIE (preview="vr" on pie_control start)
+#include "PlayInEditorDataTypes.h"
+#include "IXRTrackingSystem.h"
+#include "IHeadMountedDisplay.h"
+
 namespace
 {
 	static ULevelEditorPlaySettings* GetPlaySettingsForRW()
@@ -179,6 +184,36 @@ TSharedPtr<FJsonValue> FEditorHandlers::PieControl(const TSharedPtr<FJsonObject>
 		}
 
 		FRequestPlaySessionParams SessionParams;
+
+		// preview="vr" launches the session in the connected HMD (the editor's
+		// "VR Preview" play mode). Requires an active XR runtime; refuse with a
+		// diagnostic instead of silently falling back to a flat window.
+		const FString Preview = OptionalString(Params, TEXT("preview"), TEXT(""));
+		if (Preview.Equals(TEXT("vr"), ESearchCase::IgnoreCase))
+		{
+			IXRTrackingSystem* XR = GEngine ? GEngine->XRSystem.Get() : nullptr;
+			IHeadMountedDisplay* HMD = XR ? XR->GetHMDDevice() : nullptr;
+			const bool bHmdReady = HMD && HMD->IsHMDConnected();
+			if (!bHmdReady && !OptionalBool(Params, TEXT("force"), false))
+			{
+				return MCPError(XR
+					? TEXT("No HMD connected - VR Preview would fall back to a flat window. Connect a headset (check editor get_xr_status), or pass force=true.")
+					: TEXT("No XR system active - enable an XR runtime plugin (e.g. OpenXR; see editor list_ue_plugins filter=XR) and restart the editor, or pass force=true."));
+			}
+			SessionParams.SessionPreviewTypeOverride = EPlaySessionPreviewType::VRPreview;
+			Result->SetStringField(TEXT("preview"), TEXT("vr"));
+			Result->SetBoolField(TEXT("hmdConnected"), bHmdReady);
+		}
+		else if (Preview.Equals(TEXT("mobile"), ESearchCase::IgnoreCase))
+		{
+			SessionParams.SessionPreviewTypeOverride = EPlaySessionPreviewType::MobilePreview;
+			Result->SetStringField(TEXT("preview"), TEXT("mobile"));
+		}
+		else if (!Preview.IsEmpty() && !Preview.Equals(TEXT("none"), ESearchCase::IgnoreCase) && !Preview.Equals(TEXT("default"), ESearchCase::IgnoreCase))
+		{
+			return MCPError(FString::Printf(TEXT("Unknown preview '%s'. Expected vr, mobile, or default."), *Preview));
+		}
+
 		GEditor->RequestPlaySession(SessionParams);
 		Result->SetStringField(TEXT("action"), Action);
 	}
