@@ -84,6 +84,15 @@ private:
 	static TSharedPtr<FJsonValue> RemoveBTNode(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetBTNodeProperty(const TSharedPtr<FJsonObject>& Params);
 
+	// EQS authoring (GameplayHandlers_EQSAuthoring.cpp): same runtime-asset
+	// strategy - options (generator + tests) authored directly, EdGraph nulled.
+	static TSharedPtr<FJsonValue> AddEQSOption(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> AddEQSTest(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetEQSProperty(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> RemoveEQSNode(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ReadEQSQuery(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ListEQSClasses(const TSharedPtr<FJsonObject>& Params);
+
 	// #163 — detailed navmesh configuration
 	static TSharedPtr<FJsonValue> GetNavmeshDetails(const TSharedPtr<FJsonObject>& Params);
 

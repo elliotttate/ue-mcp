@@ -136,6 +136,13 @@ void FGameplayHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("add_bt_service"), &AddBTService);
 	Registry.RegisterHandler(TEXT("remove_bt_node"), &RemoveBTNode);
 	Registry.RegisterHandler(TEXT("set_bt_node_property"), &SetBTNodeProperty);
+	// EQS authoring (GameplayHandlers_EQSAuthoring.cpp)
+	Registry.RegisterHandler(TEXT("add_eqs_option"), &AddEQSOption);
+	Registry.RegisterHandler(TEXT("add_eqs_test"), &AddEQSTest);
+	Registry.RegisterHandler(TEXT("set_eqs_property"), &SetEQSProperty);
+	Registry.RegisterHandler(TEXT("remove_eqs_node"), &RemoveEQSNode);
+	Registry.RegisterHandler(TEXT("read_eqs_query"), &ReadEQSQuery);
+	Registry.RegisterHandler(TEXT("list_eqs_classes"), &ListEQSClasses);
 	Registry.RegisterHandler(TEXT("add_perception_component"), &AddPerceptionComponent);
 	Registry.RegisterHandler(TEXT("configure_ai_perception_sense"), &ConfigureAiPerceptionSense);
 	Registry.RegisterHandler(TEXT("add_state_tree_component"), &AddStateTreeComponent);
