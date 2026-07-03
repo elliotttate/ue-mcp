@@ -5,6 +5,7 @@
 
 #include "BlueprintHandlers.h"
 #include "BlueprintHandlers_Internal.h"
+#include "BlueprintNodeKnowledge.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 #include "HandlerJsonProperty.h"
@@ -178,6 +179,10 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AddNode(const TSharedPtr<FJsonObject>
 		return MCPError(TEXT("Failed to create node"));
 	}
 
+	// Set when the knowledge layer bound a function under a corrected name;
+	// surfaced in the result so the caller learns the real name.
+	FString FunctionResolutionNote;
+
 	// Special-case initialization for known types (must happen BEFORE AllocateDefaultPins)
 	if (UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(NewNode))
 	{
@@ -223,25 +228,29 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AddNode(const TSharedPtr<FJsonObject>
 			if (!FunctionName.IsEmpty())
 			{
 				UFunction* FoundFunc = nullptr;
+				// Set when the knowledge layer matched under a different name
+				// (display name, K2_ redirect, case fix) - reported in the result.
+				FString CorrectedFunctionName;
 
 				// 1. Try explicit target class
+				UClass* ExplicitTargetClass = nullptr;
 				if (!TargetClassName.IsEmpty())
 				{
-					UClass* TargetClass = LoadObject<UClass>(nullptr, *TargetClassName);
-					if (!TargetClass)
+					ExplicitTargetClass = LoadObject<UClass>(nullptr, *TargetClassName);
+					if (!ExplicitTargetClass)
 					{
-						TargetClass = FindClassByShortName(TargetClassName);
+						ExplicitTargetClass = FindClassByShortName(TargetClassName);
 					}
-					if (TargetClass)
+					if (ExplicitTargetClass)
 					{
-						FoundFunc = TargetClass->FindFunctionByName(FName(*FunctionName));
+						FoundFunc = MCPNodeKnowledge::FindFunctionSmart(ExplicitTargetClass, FunctionName, &CorrectedFunctionName);
 					}
 				}
 
 				// 2. Try blueprint parent class
 				if (!FoundFunc && Blueprint->ParentClass)
 				{
-					FoundFunc = Blueprint->ParentClass->FindFunctionByName(FName(*FunctionName));
+					FoundFunc = MCPNodeKnowledge::FindFunctionSmart(Blueprint->ParentClass, FunctionName, &CorrectedFunctionName);
 				}
 
 				// 3. Search common library classes
@@ -256,7 +265,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AddNode(const TSharedPtr<FJsonObject>
 					};
 					for (UClass* Lib : LibraryClasses)
 					{
-						FoundFunc = Lib->FindFunctionByName(FName(*FunctionName));
+						FoundFunc = MCPNodeKnowledge::FindFunctionSmart(Lib, FunctionName, &CorrectedFunctionName);
 						if (FoundFunc) break;
 					}
 				}
@@ -302,6 +311,32 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AddNode(const TSharedPtr<FJsonObject>
 				if (FoundFunc)
 				{
 					CallNode->SetFromFunction(FoundFunc);
+					if (!CorrectedFunctionName.IsEmpty() && CorrectedFunctionName != FunctionName)
+					{
+						FunctionResolutionNote = FString::Printf(TEXT("'%s' resolved to %s::%s"),
+							*FunctionName, *FoundFunc->GetOwnerClass()->GetName(), *CorrectedFunctionName);
+					}
+				}
+				else
+				{
+					// A named function that binds to nothing would produce a broken
+					// stub node that fails compile with a confusing message. Error
+					// out now, with ranked near-misses from the classes we searched.
+					TArray<const UClass*> Searched;
+					if (ExplicitTargetClass) Searched.Add(ExplicitTargetClass);
+					if (Blueprint->ParentClass) Searched.Add(Blueprint->ParentClass);
+					Searched.Add(UGameplayStatics::StaticClass());
+					Searched.Add(UKismetSystemLibrary::StaticClass());
+					Searched.Add(UKismetMathLibrary::StaticClass());
+					Searched.Add(UKismetStringLibrary::StaticClass());
+					Searched.Add(UKismetArrayLibrary::StaticClass());
+					const FString Suggestions = MCPNodeKnowledge::SuggestFunctions(Searched, FunctionName);
+					NewNode->MarkAsGarbage();
+					return MCPError(FString::Printf(
+						TEXT("Function '%s' not found%s.%s Use blueprint(search_node_types) to find the exact name."),
+						*FunctionName,
+						TargetClassName.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(" on class '%s'"), *TargetClassName),
+						Suggestions.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(" Did you mean: %s?"), *Suggestions)));
 				}
 			}
 		}
@@ -696,6 +731,10 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AddNode(const TSharedPtr<FJsonObject>
 	const FString NodeIdStr = NewNode->NodeGuid.ToString();
 	Result->SetStringField(TEXT("nodeId"), NodeIdStr);
 	Result->SetStringField(TEXT("title"), NewNode->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+	if (!FunctionResolutionNote.IsEmpty())
+	{
+		Result->SetStringField(TEXT("resolutionNote"), FunctionResolutionNote);
+	}
 
 	// Return pin info so the caller knows what to connect
 	TArray<TSharedPtr<FJsonValue>> PinsArray;
@@ -915,34 +954,26 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ConnectPins(const TSharedPtr<FJsonObj
 		return MCPError(FString::Printf(TEXT("Target node not found: %s"), *TargetNodeId));
 	}
 
-	// Find source pin
-	UEdGraphPin* SourcePin = nullptr;
-	for (UEdGraphPin* Pin : SourceNode->Pins)
-	{
-		if (Pin && Pin->PinName.ToString() == SourcePinName)
-		{
-			SourcePin = Pin;
-			break;
-		}
-	}
+	// Find source pin (knowledge layer: exact -> alias -> fuzzy, with
+	// suggestions + the real pin list in the error when nothing resolves).
+	MCPNodeKnowledge::FPinResolution SourceRes = MCPNodeKnowledge::ResolvePin(SourceNode, SourcePinName);
+	UEdGraphPin* SourcePin = SourceRes.Pin;
 	if (!SourcePin)
 	{
-		return MCPError(FString::Printf(TEXT("Source pin not found: '%s' on node '%s'"), *SourcePinName, *SourceNodeId));
+		return MCPError(FString::Printf(TEXT("Source pin not found: '%s' on node '%s'.%s Available pins: %s"),
+			*SourcePinName, *SourceNodeId,
+			SourceRes.Suggestions.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(" Did you mean: %s?"), *SourceRes.Suggestions),
+			*MCPNodeKnowledge::DescribeAvailablePins(SourceNode)));
 	}
 
-	// Find target pin
-	UEdGraphPin* TargetPin = nullptr;
-	for (UEdGraphPin* Pin : TargetNode->Pins)
-	{
-		if (Pin && Pin->PinName.ToString() == TargetPinName)
-		{
-			TargetPin = Pin;
-			break;
-		}
-	}
+	MCPNodeKnowledge::FPinResolution TargetRes = MCPNodeKnowledge::ResolvePin(TargetNode, TargetPinName);
+	UEdGraphPin* TargetPin = TargetRes.Pin;
 	if (!TargetPin)
 	{
-		return MCPError(FString::Printf(TEXT("Target pin not found: '%s' on node '%s'"), *TargetPinName, *TargetNodeId));
+		return MCPError(FString::Printf(TEXT("Target pin not found: '%s' on node '%s'.%s Available pins: %s"),
+			*TargetPinName, *TargetNodeId,
+			TargetRes.Suggestions.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(" Did you mean: %s?"), *TargetRes.Suggestions),
+			*MCPNodeKnowledge::DescribeAvailablePins(TargetNode)));
 	}
 
 	// Idempotency: if already linked between these two pins, short-circuit
@@ -1794,15 +1825,6 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ConnectPinsBatch(const TSharedPtr<FJs
 	const UEdGraphSchema* Schema = TargetGraph->GetSchema();
 	if (!Schema) return MCPError(TEXT("Graph has no schema"));
 
-	auto FindPin = [](UEdGraphNode* N, const FString& Name) -> UEdGraphPin*
-	{
-		for (UEdGraphPin* P : N->Pins)
-		{
-			if (P && P->PinName.ToString() == Name) return P;
-		}
-		return nullptr;
-	};
-
 	int32 Connected = 0, Existed = 0, Failed = 0;
 	TArray<TSharedPtr<FJsonValue>> Detail;
 	for (const TSharedPtr<FJsonValue>& Entry : *ConnectionsArray)
@@ -1831,14 +1853,33 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ConnectPinsBatch(const TSharedPtr<FJs
 			Failed++;
 			continue;
 		}
-		UEdGraphPin* SP = FindPin(Src, SrcPin);
-		UEdGraphPin* TP = FindPin(Tgt, TgtPin);
+		const MCPNodeKnowledge::FPinResolution SrcRes = MCPNodeKnowledge::ResolvePin(Src, SrcPin);
+		const MCPNodeKnowledge::FPinResolution TgtRes = MCPNodeKnowledge::ResolvePin(Tgt, TgtPin);
+		UEdGraphPin* SP = SrcRes.Pin;
+		UEdGraphPin* TP = TgtRes.Pin;
 		if (!SP || !TP)
 		{
 			EntryResult->SetStringField(TEXT("status"), TEXT("pin_not_found"));
+			const MCPNodeKnowledge::FPinResolution& Missing = SP ? TgtRes : SrcRes;
+			UEdGraphNode* MissingNode = SP ? Tgt : Src;
+			FString Reason = FString::Printf(TEXT("'%s' not on node. Available: %s"),
+				SP ? *TgtPin : *SrcPin, *MCPNodeKnowledge::DescribeAvailablePins(MissingNode));
+			if (!Missing.Suggestions.IsEmpty())
+			{
+				Reason += FString::Printf(TEXT(" (did you mean: %s?)"), *Missing.Suggestions);
+			}
+			EntryResult->SetStringField(TEXT("reason"), Reason);
 			Detail.Add(MakeShared<FJsonValueObject>(EntryResult));
 			Failed++;
 			continue;
+		}
+		if (!SrcRes.CorrectedFrom.IsEmpty())
+		{
+			EntryResult->SetStringField(TEXT("sourcePinResolved"), SP->PinName.ToString());
+		}
+		if (!TgtRes.CorrectedFrom.IsEmpty())
+		{
+			EntryResult->SetStringField(TEXT("targetPinResolved"), TP->PinName.ToString());
 		}
 		if (SP->LinkedTo.Contains(TP))
 		{
