@@ -75,6 +75,15 @@ private:
 	// v0.7.11 — BT graph traversal (#124)
 	static TSharedPtr<FJsonValue> ReadBehaviorTreeGraph(const TSharedPtr<FJsonObject>& Params);
 
+	// BT node authoring (GameplayHandlers_BTAuthoring.cpp): mutate the runtime
+	// tree and drop the editor graph so it regenerates on next editor open.
+	static TSharedPtr<FJsonValue> AddBTComposite(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> AddBTTask(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> AddBTDecorator(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> AddBTService(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> RemoveBTNode(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetBTNodeProperty(const TSharedPtr<FJsonObject>& Params);
+
 	// #163 — detailed navmesh configuration
 	static TSharedPtr<FJsonValue> GetNavmeshDetails(const TSharedPtr<FJsonObject>& Params);
 
