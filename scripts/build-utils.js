@@ -41,14 +41,24 @@ function findUEBuildTool() {
     return envPath;
   }
 
-  // Check default UE5 installation paths
+  // Same search roots as src/editor-control.ts so `npm run build` and the
+  // server's editor control resolve the same engine install.
   const versions = ['5.7', '5.6', '5.5', '5.4', '5.3'];
-  const basePath = 'C:/Program Files/Epic Games';
-  
-  for (const version of versions) {
-    const buildToolPath = path.join(basePath, `UE_${version}`, 'Engine', 'Build', 'BatchFiles', 'Build.bat');
-    if (fs.existsSync(buildToolPath)) {
-      return buildToolPath;
+  const basePaths = [
+    'C:/Program Files/Epic Games',
+    'D:/Program Files/Epic Games',
+    'E:/Program Files/Epic Games',
+    'C:/Epic Games',
+    'D:/Epic Games',
+    'E:/Epic Games',
+  ];
+
+  for (const basePath of basePaths) {
+    for (const version of versions) {
+      const buildToolPath = path.join(basePath, `UE_${version}`, 'Engine', 'Build', 'BatchFiles', 'Build.bat');
+      if (fs.existsSync(buildToolPath)) {
+        return buildToolPath;
+      }
     }
   }
 
