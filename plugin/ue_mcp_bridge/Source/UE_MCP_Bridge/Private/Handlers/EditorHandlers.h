@@ -181,4 +181,10 @@ private:
 	static TSharedPtr<FJsonValue> SimulatePieInput(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CheckPieCondition(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> PieLineTrace(const TSharedPtr<FJsonObject>& Params);
+
+	// Insights trace capture + analysis (EditorHandlers_Profiling.cpp).
+	static TSharedPtr<FJsonValue> StartTrace(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> StopTrace(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> GetTraceStatus(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> AnalyzeTrace(const TSharedPtr<FJsonObject>& Params);
 };

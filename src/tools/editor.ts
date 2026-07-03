@@ -139,6 +139,16 @@ export const editorTool: ToolDef = categoryTool(
     redo: bp("Redo last transaction", "redo"),
     get_perf_stats: bp("Editor performance stats", "get_editor_performance_stats"),
     run_stat: bp("Run stat command. Params: command", "run_stat_command"),
+    start_trace: bp("Start writing an Unreal Insights .utrace to disk. Params: channels? (default 'default,frame,bookmark'), outputPath? (default Saved/Profiling/MCP_<timestamp>.utrace). Returns tracePath", "start_trace", (p) => ({ channels: p.channels, outputPath: p.outputPath })),
+    stop_trace: bp("Stop the active Insights trace. Returns the finished tracePath, ready for analyze_trace", "stop_trace"),
+    get_trace_status: bp("Whether an Insights trace is running and where it writes", "get_trace_status"),
+    analyze_trace: { ...bp("Analyze a .utrace via TraceServices: duration, game/render frame stats (avg/min/max/p50/p90/p99 ms, avg fps, hitches over 33ms), bookmarks. Params: tracePath", "analyze_trace", (p) => ({ tracePath: p.tracePath })), timeoutMs: 180_000 },
+    profile_pie: {
+      description: "One-call profiler: start an Insights trace, ensure PIE is running, capture for durationSeconds (default 10), stop the trace, and return the analyzed frame stats. Params: durationSeconds?, channels?, stopPieAfter? (default false)",
+      handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
+        return profilePie(ctx, p);
+      },
+    },
     set_scalability: bp("Set quality. Params: level", "set_scalability"),
     capture_screenshot: bp("Screenshot. Params: filename?, resolution?, target? (auto|pie|editor; auto routes to PIE viewport when PIE is running) (#226)", "capture_screenshot"),
     capture_scene_png: bp("Headless PNG screenshot via SceneCapture2D (works unfocused, guaranteed RGBA8 LDR). Params: outputPath, location?, rotation?, width? (default 1280), height? (default 720), fov? (default 90) (#148)", "capture_scene_png", (p) => ({ outputPath: p.outputPath, location: p.location, rotation: p.rotation, width: p.width, height: p.height, fov: p.fov })),
@@ -270,6 +280,10 @@ export const editorTool: ToolDef = categoryTool(
     traceChannel: z.string().optional().describe("pie_line_trace: Visibility (default) | Camera | Pawn | WorldStatic | WorldDynamic | PhysicsBody"),
     steps: z.array(z.record(z.unknown())).optional().describe("run_pie_test_sequence: ordered step list (see action description)"),
     stopOnFailure: z.boolean().optional().describe("run_pie_test_sequence: stop at the first failed step (default true)"),
+    channels: z.string().optional().describe("start_trace/profile_pie: Insights channel list (default 'default,frame,bookmark')"),
+    tracePath: z.string().optional().describe("analyze_trace: path to a .utrace file"),
+    durationSeconds: z.number().optional().describe("profile_pie: capture length (default 10)"),
+    stopPieAfter: z.boolean().optional().describe("profile_pie: stop PIE when the capture ends (default false)"),
   },
 );
 
@@ -328,6 +342,37 @@ async function waitForPieCondition(ctx: ToolContext, p: Record<string, unknown>)
     }
     await sleep(intervalMs);
   }
+}
+
+async function profilePie(ctx: ToolContext, p: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const durationSeconds = Math.min(typeof p.durationSeconds === "number" ? p.durationSeconds : 10, 300);
+
+  const started = (await ctx.bridge.call("start_trace", { channels: p.channels })) as Record<string, unknown>;
+  const tracePath = started?.tracePath;
+
+  let pieStartedHere = false;
+  try {
+    const status = (await ctx.bridge.call("check_pie_condition", { condition: "pie_running" })) as Record<string, unknown>;
+    if (status?.met !== true) {
+      await ctx.bridge.call("pie_control", { action: "start" }, 200_000);
+      const wait = await waitForPieCondition(ctx, { condition: "pie_running", timeoutMs: 60_000 });
+      if (wait.met !== true) {
+        throw new McpError(ErrorCode.NO_HANDLER, "PIE did not start within 60s - trace aborted");
+      }
+      pieStartedHere = true;
+      // Give the world a moment to settle so startup hitches don't dominate.
+      await sleep(2_000);
+    }
+    await sleep(durationSeconds * 1000);
+  } finally {
+    try { await ctx.bridge.call("stop_trace", {}); } catch { /* trace may have stopped with an editor error */ }
+    if (pieStartedHere && p.stopPieAfter === true) {
+      try { await ctx.bridge.call("pie_control", { action: "stop" }); } catch { /* leave PIE state as-is */ }
+    }
+  }
+
+  const analysis = await ctx.bridge.call("analyze_trace", { tracePath }, 180_000);
+  return { tracePath, durationSeconds, pieStartedHere, analysis };
 }
 
 async function runPieTestSequence(ctx: ToolContext, p: Record<string, unknown>): Promise<Record<string, unknown>> {

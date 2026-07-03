@@ -76,6 +76,7 @@ public class UE_MCP_Bridge : ModuleRules
 				"StructUtils",
 				"SubobjectDataInterface",
 				"ToolMenus",
+				"TraceServices",
 				"RenderCore",
 				"RHI",
 				"UMG",

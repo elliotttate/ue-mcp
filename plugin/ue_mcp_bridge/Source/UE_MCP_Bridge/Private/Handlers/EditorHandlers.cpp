@@ -126,6 +126,11 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("simulate_pie_input"), &SimulatePieInput);
 	Registry.RegisterHandler(TEXT("check_pie_condition"), &CheckPieCondition);
 	Registry.RegisterHandler(TEXT("pie_line_trace"), &PieLineTrace);
+	// Insights trace capture + analysis (EditorHandlers_Profiling.cpp).
+	Registry.RegisterHandler(TEXT("start_trace"), &StartTrace);
+	Registry.RegisterHandler(TEXT("stop_trace"), &StopTrace);
+	Registry.RegisterHandler(TEXT("get_trace_status"), &GetTraceStatus);
+	Registry.RegisterHandler(TEXT("analyze_trace"), &AnalyzeTrace);
 }
 
 TSharedPtr<FJsonValue> FEditorHandlers::ExecuteCommand(const TSharedPtr<FJsonObject>& Params)
