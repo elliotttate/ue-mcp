@@ -21,6 +21,11 @@ private:
 	static TSharedPtr<FJsonValue> CreateEnum(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetEnumEntries(const TSharedPtr<FJsonObject>& Params);
 
+	// UserDefinedStruct authoring — the datatable/blueprint-variable building block.
+	static TSharedPtr<FJsonValue> CreateStruct(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetStructMembers(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ReadStructMembers(const TSharedPtr<FJsonObject>& Params);
+
 	// Helper functions
 	static UClass* FindClass(const FString& ClassName);
 	static UScriptStruct* FindStruct(const FString& StructName);

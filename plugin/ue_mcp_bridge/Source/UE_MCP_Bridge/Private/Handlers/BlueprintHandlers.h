@@ -10,6 +10,11 @@ public:
 	// Register all blueprint handlers
 	static void RegisterHandlers(class FMCPHandlerRegistry& Registry);
 
+	/** Resolve a friendly type string ("float", "Actor", "array:int",
+	 *  "map:string,float", "enum:/Game/E_Foo", ...) to a pin type. Shared with
+	 *  struct-member authoring in FReflectionHandlers. */
+	static struct FEdGraphPinType MakePinType(const FString& TypeStr);
+
 private:
 	// Handler implementations
 	static TSharedPtr<FJsonValue> CreateBlueprint(const TSharedPtr<FJsonObject>& Params);
@@ -91,7 +96,6 @@ private:
 
 	// Helper functions
 	static class UBlueprint* LoadBlueprint(const FString& AssetPath);
-	static struct FEdGraphPinType MakePinType(const FString& TypeStr);
 	static class UEdGraph* FindGraph(class UBlueprint* Blueprint, const FString& GraphName);
 	static class UEdGraphNode* FindNodeByGuidOrName(class UEdGraph* Graph, const FString& NodeId);
 };

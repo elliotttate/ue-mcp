@@ -13,6 +13,9 @@ export const reflectionTool: ToolDef = categoryTool(
     create_tag:     bp("Create gameplay tag. Params: tag, comment?", "create_gameplay_tag"),
     create_enum:    bp("Create UUserDefinedEnum asset, optionally seeded with entries. Params: name, packagePath?, entries?: (string|{name, displayName?})[], onConflict? (#274)", "create_enum", (p) => ({ name: p.name, packagePath: p.packagePath, entries: p.entries, onConflict: p.onConflict })),
     set_enum_entries: bp("Replace entries on an existing UUserDefinedEnum. Params: assetPath, entries[] (#274)", "set_enum_entries", (p) => ({ assetPath: p.assetPath, entries: p.entries })),
+    create_struct:  bp("Create a UUserDefinedStruct asset (datatable row structs, typed BP variables). Params: name, packagePath?, members: {name, type, default?, tooltip?}[], onConflict?. Types accept the blueprint variable syntax incl. containers (array:float, set:name, map:string,int, enum:/Game/E_Foo)", "create_struct", (p) => ({ name: p.name, packagePath: p.packagePath, members: p.members, onConflict: p.onConflict })),
+    set_struct_members: bp("Replace all members on an existing UUserDefinedStruct. Params: assetPath, members[]", "set_struct_members", (p) => ({ assetPath: p.assetPath, members: p.members })),
+    read_struct_members: bp("List a UUserDefinedStruct's members with friendly names, types, guids, defaults, and compile status. Params: assetPath", "read_struct_members", (p) => ({ assetPath: p.assetPath })),
   },
   undefined,
   {
@@ -32,6 +35,12 @@ export const reflectionTool: ToolDef = categoryTool(
       z.string(),
       z.object({ name: z.string(), displayName: z.string().optional() }),
     ])).optional().describe("Enum entries — strings or {name, displayName?}"),
+    members: z.array(z.object({
+      name: z.string(),
+      type: z.string().describe("Blueprint variable type syntax: float, int, bool, string, Vector, Actor, enum:/Game/E_Foo, array:float, map:string,int, ..."),
+      default: z.string().optional(),
+      tooltip: z.string().optional(),
+    })).optional().describe("Struct members (create_struct / set_struct_members)"),
     onConflict: z.string().optional().describe("Asset-creation conflict policy: skip (default) | error | overwrite"),
   },
 );

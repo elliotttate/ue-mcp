@@ -8,7 +8,12 @@
 #include "UObject/UObjectIterator.h"
 #include "Engine/Engine.h"
 #include "Engine/UserDefinedEnum.h"
+#include "Engine/UserDefinedStruct.h"
 #include "Kismet2/EnumEditorUtils.h"
+#include "Kismet2/StructureEditorUtils.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
+#include "BlueprintHandlers.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
 #include "Factories/Factory.h"
@@ -34,6 +39,9 @@ void FReflectionHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("create_gameplay_tag"), &CreateGameplayTag);
 	Registry.RegisterHandler(TEXT("create_enum"), &CreateEnum);
 	Registry.RegisterHandler(TEXT("set_enum_entries"), &SetEnumEntries);
+	Registry.RegisterHandler(TEXT("create_struct"), &CreateStruct);
+	Registry.RegisterHandler(TEXT("set_struct_members"), &SetStructMembers);
+	Registry.RegisterHandler(TEXT("read_struct_members"), &ReadStructMembers);
 }
 
 namespace
@@ -729,4 +737,272 @@ TSharedPtr<FJsonValue> FReflectionHandlers::SetEnumEntries(const TSharedPtr<FJso
 	Result->SetStringField(TEXT("assetPath"), AssetPath);
 	Result->SetNumberField(TEXT("entries"), Added);
 	return MCPResult(Result);
+}
+
+// ─── UserDefinedStruct authoring ────────────────────────────────────────
+
+namespace
+{
+	/** Append one member to a UserDefinedStruct: resolve the type string via the
+	 *  shared blueprint pin-type resolver, add, rename, optionally set default. */
+	bool AddStructMemberFromJson(UUserDefinedStruct* Struct, const TSharedPtr<FJsonObject>& Member, FString& OutError)
+	{
+		FString MemberName, TypeStr;
+		if (!Member->TryGetStringField(TEXT("name"), MemberName) || MemberName.IsEmpty())
+		{
+			OutError = TEXT("member missing 'name'");
+			return false;
+		}
+		if (!Member->TryGetStringField(TEXT("type"), TypeStr) || TypeStr.IsEmpty())
+		{
+			OutError = FString::Printf(TEXT("member '%s' missing 'type'"), *MemberName);
+			return false;
+		}
+
+		const FEdGraphPinType PinType = FBlueprintHandlers::MakePinType(TypeStr);
+		if (PinType.PinCategory == NAME_None)
+		{
+			OutError = FString::Printf(
+				TEXT("member '%s': unrecognized type '%s'. Use a known type (Bool, Int, Float, String, Name, Text, Vector, Rotator, Transform, ...), a class/struct path, enum:/Game/Path/E_Foo, or a container (array:float, set:name, map:string,int)."),
+				*MemberName, *TypeStr);
+			return false;
+		}
+
+		if (!FStructureEditorUtils::AddVariable(Struct, PinType))
+		{
+			OutError = FString::Printf(TEXT("member '%s': AddVariable failed"), *MemberName);
+			return false;
+		}
+
+		const TArray<FStructVariableDescription>& Vars = FStructureEditorUtils::GetVarDesc(Struct);
+		if (Vars.Num() == 0)
+		{
+			OutError = FString::Printf(TEXT("member '%s': struct has no variable descriptions after add"), *MemberName);
+			return false;
+		}
+		const FGuid NewGuid = Vars.Last().VarGuid;
+		if (!FStructureEditorUtils::RenameVariable(Struct, NewGuid, MemberName))
+		{
+			OutError = FString::Printf(TEXT("member '%s': rename failed (name taken or invalid)"), *MemberName);
+			return false;
+		}
+
+		FString DefaultValue;
+		if (Member->TryGetStringField(TEXT("default"), DefaultValue) && !DefaultValue.IsEmpty())
+		{
+			FStructureEditorUtils::ChangeVariableDefaultValue(Struct, NewGuid, DefaultValue);
+		}
+		FString Tooltip;
+		if (Member->TryGetStringField(TEXT("tooltip"), Tooltip) && !Tooltip.IsEmpty())
+		{
+			FStructureEditorUtils::ChangeVariableTooltip(Struct, NewGuid, Tooltip);
+		}
+		return true;
+	}
+
+	/** Structure status → short string for results. */
+	FString StructStatusString(const UUserDefinedStruct* Struct)
+	{
+		switch (Struct->Status.GetValue())
+		{
+		case EUserDefinedStructureStatus::UDSS_UpToDate: return TEXT("UpToDate");
+		case EUserDefinedStructureStatus::UDSS_Dirty: return TEXT("Dirty");
+		case EUserDefinedStructureStatus::UDSS_Error: return TEXT("Error");
+		case EUserDefinedStructureStatus::UDSS_Duplicate: return TEXT("Duplicate");
+		default: return TEXT("Unknown");
+		}
+	}
+
+	TSharedPtr<FJsonValue> DescribeStructMembers(UUserDefinedStruct* Struct)
+	{
+		TArray<TSharedPtr<FJsonValue>> Members;
+		for (const FStructVariableDescription& Var : FStructureEditorUtils::GetVarDesc(Struct))
+		{
+			TSharedPtr<FJsonObject> M = MakeShared<FJsonObject>();
+			M->SetStringField(TEXT("name"), Var.FriendlyName);
+			M->SetStringField(TEXT("guid"), Var.VarGuid.ToString());
+			M->SetStringField(TEXT("type"), UEdGraphSchema_K2::TypeToText(Var.ToPinType()).ToString());
+			if (!Var.DefaultValue.IsEmpty())
+			{
+				M->SetStringField(TEXT("default"), Var.DefaultValue);
+			}
+			Members.Add(MakeShared<FJsonValueObject>(M));
+		}
+
+		auto Result = MCPSuccess();
+		Result->SetStringField(TEXT("assetPath"), Struct->GetPathName());
+		Result->SetStringField(TEXT("status"), StructStatusString(Struct));
+		if (Struct->Status == EUserDefinedStructureStatus::UDSS_Error)
+		{
+			Result->SetStringField(TEXT("errorMessage"), Struct->ErrorMessage);
+		}
+		Result->SetArrayField(TEXT("members"), Members);
+		return MCPResult(Result);
+	}
+}
+
+// Creates a UUserDefinedStruct asset and populates its members. Structs are the
+// prerequisite for datatable rows and typed blueprint variables, so the bridge
+// must be able to author them without editor UI.
+TSharedPtr<FJsonValue> FReflectionHandlers::CreateStruct(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Name;
+	if (auto Err = RequireString(Params, TEXT("name"), Name)) return Err;
+	const FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game"));
+	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
+
+	const TArray<TSharedPtr<FJsonValue>>* MembersArr = nullptr;
+	if (!Params->TryGetArrayField(TEXT("members"), MembersArr) || !MembersArr || MembersArr->Num() == 0)
+	{
+		return MCPError(TEXT("Missing 'members' (non-empty array of {name, type, default?, tooltip?})"));
+	}
+
+	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("UserDefinedStruct")))
+	{
+		return Existing;
+	}
+
+	const FString PkgName = PackagePath / Name;
+	UPackage* Package = CreatePackage(*PkgName);
+	if (!Package)
+	{
+		return MCPError(FString::Printf(TEXT("Failed to create package %s"), *PkgName));
+	}
+	// Same construction path as the editor's StructureFactory: seeds the default
+	// member, guid, and editor data.
+	UUserDefinedStruct* Struct = Cast<UUserDefinedStruct>(
+		FStructureEditorUtils::CreateUserDefinedStruct(Package, FName(*Name), RF_Public | RF_Standalone | RF_Transactional));
+	if (!Struct)
+	{
+		return MCPError(TEXT("FStructureEditorUtils::CreateUserDefinedStruct failed"));
+	}
+	FAssetRegistryModule::AssetCreated(Struct);
+
+	// The factory seeds one placeholder member; capture its guid so it can be
+	// removed once at least one real member exists (a UDS must never be empty).
+	TArray<FGuid> SeedGuids;
+	for (const FStructVariableDescription& Var : FStructureEditorUtils::GetVarDesc(Struct))
+	{
+		SeedGuids.Add(Var.VarGuid);
+	}
+
+	int32 Added = 0;
+	TArray<TSharedPtr<FJsonValue>> MemberErrors;
+	for (const TSharedPtr<FJsonValue>& MemberValue : *MembersArr)
+	{
+		TSharedPtr<FJsonObject> Member = MemberValue->AsObject();
+		if (!Member.IsValid()) continue;
+		FString MemberError;
+		if (AddStructMemberFromJson(Struct, Member, MemberError))
+		{
+			Added++;
+		}
+		else
+		{
+			MemberErrors.Add(MakeShared<FJsonValueString>(MemberError));
+		}
+	}
+
+	if (Added > 0)
+	{
+		for (const FGuid& Seed : SeedGuids)
+		{
+			FStructureEditorUtils::RemoveVariable(Struct, Seed);
+		}
+	}
+
+	Struct->MarkPackageDirty();
+	UEditorAssetLibrary::SaveAsset(Struct->GetPathName());
+
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetStringField(TEXT("assetPath"), Struct->GetPathName());
+	Result->SetStringField(TEXT("name"), Name);
+	Result->SetNumberField(TEXT("membersAdded"), Added);
+	Result->SetStringField(TEXT("status"), StructStatusString(Struct));
+	if (MemberErrors.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("memberErrors"), MemberErrors);
+	}
+	MCPSetDeleteAssetRollback(Result, Struct->GetPathName());
+	return MCPResult(Result);
+}
+
+// Replace the member list on an existing UUserDefinedStruct (add new, then
+// drop old, so the struct is never empty mid-edit).
+TSharedPtr<FJsonValue> FReflectionHandlers::SetStructMembers(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireString(Params, TEXT("assetPath"), AssetPath)) return Err;
+
+	UUserDefinedStruct* Struct = Cast<UUserDefinedStruct>(LoadObject<UObject>(nullptr, *AssetPath));
+	if (!Struct) return MCPError(FString::Printf(TEXT("UserDefinedStruct not found: %s"), *AssetPath));
+
+	const TArray<TSharedPtr<FJsonValue>>* MembersArr = nullptr;
+	if (!Params->TryGetArrayField(TEXT("members"), MembersArr) || !MembersArr || MembersArr->Num() == 0)
+	{
+		return MCPError(TEXT("Missing 'members' (non-empty array of {name, type, default?, tooltip?})"));
+	}
+
+	TArray<FGuid> OldGuids;
+	for (const FStructVariableDescription& Var : FStructureEditorUtils::GetVarDesc(Struct))
+	{
+		OldGuids.Add(Var.VarGuid);
+	}
+
+	int32 Added = 0;
+	TArray<TSharedPtr<FJsonValue>> MemberErrors;
+	for (const TSharedPtr<FJsonValue>& MemberValue : *MembersArr)
+	{
+		TSharedPtr<FJsonObject> Member = MemberValue->AsObject();
+		if (!Member.IsValid()) continue;
+		FString MemberError;
+		if (AddStructMemberFromJson(Struct, Member, MemberError))
+		{
+			Added++;
+		}
+		else
+		{
+			MemberErrors.Add(MakeShared<FJsonValueString>(MemberError));
+		}
+	}
+
+	if (Added == 0)
+	{
+		auto Result = MCPError(TEXT("No members could be added; existing members left untouched"));
+		return Result;
+	}
+
+	for (const FGuid& Old : OldGuids)
+	{
+		FStructureEditorUtils::RemoveVariable(Struct, Old);
+	}
+
+	Struct->MarkPackageDirty();
+	UEditorAssetLibrary::SaveAsset(Struct->GetPathName());
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("assetPath"), AssetPath);
+	Result->SetNumberField(TEXT("members"), Added);
+	Result->SetStringField(TEXT("status"), StructStatusString(Struct));
+	if (MemberErrors.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("memberErrors"), MemberErrors);
+	}
+	return MCPResult(Result);
+}
+
+// Friendly member listing for a UserDefinedStruct. reflect_struct shows the
+// compiled (guid-suffixed) property names; this returns the editor-facing
+// names and per-member guids that set_struct_members operates on.
+TSharedPtr<FJsonValue> FReflectionHandlers::ReadStructMembers(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireString(Params, TEXT("assetPath"), AssetPath)) return Err;
+
+	UUserDefinedStruct* Struct = Cast<UUserDefinedStruct>(LoadObject<UObject>(nullptr, *AssetPath));
+	if (!Struct) return MCPError(FString::Printf(TEXT("UserDefinedStruct not found: %s"), *AssetPath));
+
+	return DescribeStructMembers(Struct);
 }

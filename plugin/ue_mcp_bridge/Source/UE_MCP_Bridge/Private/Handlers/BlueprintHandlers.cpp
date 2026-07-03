@@ -456,6 +456,59 @@ FEdGraphPinType FBlueprintHandlers::MakePinType(const FString& TypeStr)
 	PinType.PinCategory = NAME_None;
 	PinType.PinSubCategory = NAME_None;
 
+	// Containers: "array:<inner>" / "set:<inner>" / "map:<key>,<value>" plus the
+	// C++ spellings TArray<...> / TSet<...> / TMap<...>. Resolved recursively so
+	// any scalar type string works as the element type.
+	{
+		FString Trimmed = TypeStr;
+		Trimmed.TrimStartAndEndInline();
+		auto ExtractInner = [&Trimmed](const TCHAR* Prefix, const TCHAR* Template_) -> FString
+		{
+			if (Trimmed.StartsWith(Prefix, ESearchCase::IgnoreCase))
+			{
+				return Trimmed.Mid(FCString::Strlen(Prefix)).TrimStartAndEnd();
+			}
+			const FString TemplateOpen = FString(Template_) + TEXT("<");
+			if (Trimmed.StartsWith(TemplateOpen, ESearchCase::IgnoreCase) && Trimmed.EndsWith(TEXT(">")))
+			{
+				return Trimmed.Mid(TemplateOpen.Len(), Trimmed.Len() - TemplateOpen.Len() - 1).TrimStartAndEnd();
+			}
+			return FString();
+		};
+
+		const FString ArrayInner = ExtractInner(TEXT("array:"), TEXT("TArray"));
+		const FString SetInner = ArrayInner.IsEmpty() ? ExtractInner(TEXT("set:"), TEXT("TSet")) : FString();
+		const FString MapInner = (ArrayInner.IsEmpty() && SetInner.IsEmpty()) ? ExtractInner(TEXT("map:"), TEXT("TMap")) : FString();
+
+		if (!ArrayInner.IsEmpty() || !SetInner.IsEmpty())
+		{
+			PinType = MakePinType(!ArrayInner.IsEmpty() ? ArrayInner : SetInner);
+			if (PinType.PinCategory != NAME_None)
+			{
+				PinType.ContainerType = !ArrayInner.IsEmpty() ? EPinContainerType::Array : EPinContainerType::Set;
+			}
+			return PinType;
+		}
+		if (!MapInner.IsEmpty())
+		{
+			FString KeyStr, ValueStr;
+			if (!MapInner.Split(TEXT(","), &KeyStr, &ValueStr))
+			{
+				return PinType; // map needs "key,value" — unresolved
+			}
+			PinType = MakePinType(KeyStr.TrimStartAndEnd());
+			const FEdGraphPinType ValueType = MakePinType(ValueStr.TrimStartAndEnd());
+			if (PinType.PinCategory == NAME_None || ValueType.PinCategory == NAME_None)
+			{
+				PinType.PinCategory = NAME_None;
+				return PinType;
+			}
+			PinType.ContainerType = EPinContainerType::Map;
+			PinType.PinValueType = FEdGraphTerminalType::FromPinType(ValueType);
+			return PinType;
+		}
+	}
+
 	FString LowerType = TypeStr.ToLower();
 
 	// (#140) Object-reference types: "Actor", "Actor*", "APawn*", full class paths
