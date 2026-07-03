@@ -22,6 +22,15 @@
 #include "Tracks/MovieSceneAudioTrack.h"
 #include "Tracks/MovieSceneEventTrack.h"
 #include "Tracks/MovieSceneFadeTrack.h"
+#include "Tracks/MovieSceneVisibilityTrack.h"
+#include "Tracks/MovieSceneBoolTrack.h"
+#include "Tracks/MovieSceneIntegerTrack.h"
+#include "Tracks/MovieSceneColorTrack.h"
+#include "Tracks/MovieSceneSubTrack.h"
+#include "Tracks/MovieScenePropertyTrack.h"
+#include "Sections/MovieSceneSubSection.h"
+#include "Channels/MovieSceneBoolChannel.h"
+#include "Channels/MovieSceneIntegerChannel.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "EditorScriptingUtilities/Public/EditorAssetLibrary.h"
 #include "UObject/Package.h"
@@ -41,6 +50,11 @@ void FSequencerHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("set_sequence_playback_range"), &SetPlaybackRange);
 	Registry.RegisterHandler(TEXT("add_sequence_section"), &AddSection);
 	Registry.RegisterHandler(TEXT("set_sequence_keyframes"), &SetKeyframes);
+	// Movie Render Queue (SequencerHandlers_MRQ.cpp)
+	Registry.RegisterHandler(TEXT("mrq_create_job"), &MrqCreateJob);
+	Registry.RegisterHandler(TEXT("mrq_render"), &MrqRender);
+	Registry.RegisterHandler(TEXT("mrq_status"), &MrqStatus);
+	Registry.RegisterHandler(TEXT("mrq_clear"), &MrqClear);
 }
 
 // ─── #548 sequencer authoring helpers ────────────────────────────────
@@ -88,6 +102,11 @@ namespace
 		if (TrackType.Equals(TEXT("Audio"), ESearchCase::IgnoreCase)) return UMovieSceneAudioTrack::StaticClass();
 		if (TrackType.Equals(TEXT("Event"), ESearchCase::IgnoreCase)) return UMovieSceneEventTrack::StaticClass();
 		if (TrackType.Equals(TEXT("Fade"), ESearchCase::IgnoreCase)) return UMovieSceneFadeTrack::StaticClass();
+		if (TrackType.Equals(TEXT("Visibility"), ESearchCase::IgnoreCase)) return UMovieSceneVisibilityTrack::StaticClass();
+		if (TrackType.Equals(TEXT("Bool"), ESearchCase::IgnoreCase)) return UMovieSceneBoolTrack::StaticClass();
+		if (TrackType.Equals(TEXT("Integer"), ESearchCase::IgnoreCase)) return UMovieSceneIntegerTrack::StaticClass();
+		if (TrackType.Equals(TEXT("Color"), ESearchCase::IgnoreCase)) return UMovieSceneColorTrack::StaticClass();
+		if (TrackType.Equals(TEXT("Sub"), ESearchCase::IgnoreCase) || TrackType.Equals(TEXT("Subsequence"), ESearchCase::IgnoreCase)) return UMovieSceneSubTrack::StaticClass();
 		return nullptr;
 	}
 
@@ -567,6 +586,22 @@ TSharedPtr<FJsonValue> FSequencerHandlers::AddSection(const TSharedPtr<FJsonObje
 	}
 	if (!Track) return MCPError(FString::Printf(TEXT("Failed to resolve/add %s track"), *TrackType));
 
+	// Property tracks (Float/Bool/Integer/Color/Visibility) animate a named
+	// property on the bound object. Visibility defaults to bHidden like the
+	// Sequencer UI; the rest require propertyName to do anything useful.
+	if (UMovieScenePropertyTrack* PropertyTrack = Cast<UMovieScenePropertyTrack>(Track))
+	{
+		FString PropertyName = OptionalString(Params, TEXT("propertyName"), TEXT(""));
+		if (PropertyName.IsEmpty() && Track->IsA<UMovieSceneVisibilityTrack>())
+		{
+			PropertyName = TEXT("bHidden");
+		}
+		if (!PropertyName.IsEmpty())
+		{
+			PropertyTrack->SetPropertyNameAndPath(FName(*PropertyName), PropertyName);
+		}
+	}
+
 	// Resolve the camera binding up front so a bad cameraActorLabel fails before
 	// we create an orphan section.
 	const FString CameraActorLabel = OptionalString(Params, TEXT("cameraActorLabel"));
@@ -598,6 +633,22 @@ TSharedPtr<FJsonValue> FSequencerHandlers::AddSection(const TSharedPtr<FJsonObje
 		{
 			CutSection->SetCameraGuid(CamGuid);
 		}
+	}
+
+	// Sub track: point the section at the child sequence.
+	if (UMovieSceneSubSection* SubSection = Cast<UMovieSceneSubSection>(Section))
+	{
+		const FString SubSequencePath = OptionalString(Params, TEXT("subSequencePath"), TEXT(""));
+		if (SubSequencePath.IsEmpty())
+		{
+			return MCPError(TEXT("Sub track sections require 'subSequencePath' (the child LevelSequence asset)"));
+		}
+		ULevelSequence* SubSequence = LoadObject<ULevelSequence>(nullptr, *SubSequencePath);
+		if (!SubSequence)
+		{
+			return MCPError(FString::Printf(TEXT("Child sequence not found: %s"), *SubSequencePath));
+		}
+		SubSection->SetSequence(SubSequence);
 	}
 
 	const int32 SectionIndex = Track->GetAllSections().IndexOfByKey(Section);
@@ -743,9 +794,69 @@ TSharedPtr<FJsonValue> FSequencerHandlers::SetKeyframes(const TSharedPtr<FJsonOb
 		}
 	}
 
+	// Bool channels (Visibility/Bool tracks) - value accepts true/false or 0/1.
 	if (!bMatched)
 	{
-		return MCPError(FString::Printf(TEXT("Channel '%s' not found on the section. For Transform use Location.X/Rotation.Z/etc or x/yaw; for Fade use the float channel."), *ChannelName));
+		TArrayView<FMovieSceneBoolChannel*> BoolChannels = Proxy.GetChannels<FMovieSceneBoolChannel>();
+		TArrayView<const FMovieSceneChannelMetaData> BoolMeta = Proxy.GetMetaData<FMovieSceneBoolChannel>();
+		int32 ChosenIdx = INDEX_NONE;
+		for (int32 i = 0; i < BoolChannels.Num(); ++i)
+		{
+			if (BoolMeta.IsValidIndex(i) && BoolMeta[i].Name.ToString().Equals(ChannelName, ESearchCase::IgnoreCase)) { ChosenIdx = i; break; }
+		}
+		if (ChosenIdx == INDEX_NONE && BoolChannels.Num() == 1) ChosenIdx = 0;
+		if (ChosenIdx != INDEX_NONE)
+		{
+			for (const TSharedPtr<FJsonValue>& KfVal : *Keyframes)
+			{
+				const TSharedPtr<FJsonObject>* Kf = nullptr;
+				if (!KfVal->TryGetObject(Kf) || !Kf) continue;
+				double Sec = 0.0;
+				(*Kf)->TryGetNumberField(TEXT("seconds"), Sec);
+				bool bValue = false;
+				if (!(*Kf)->TryGetBoolField(TEXT("value"), bValue))
+				{
+					double Num = 0.0;
+					(*Kf)->TryGetNumberField(TEXT("value"), Num);
+					bValue = Num != 0.0;
+				}
+				BoolChannels[ChosenIdx]->GetData().AddKey(Tick.AsFrameNumber(Sec), bValue);
+				++KeysAdded;
+			}
+			bMatched = true;
+		}
+	}
+
+	// Integer channels.
+	if (!bMatched)
+	{
+		TArrayView<FMovieSceneIntegerChannel*> IntChannels = Proxy.GetChannels<FMovieSceneIntegerChannel>();
+		TArrayView<const FMovieSceneChannelMetaData> IntMeta = Proxy.GetMetaData<FMovieSceneIntegerChannel>();
+		int32 ChosenIdx = INDEX_NONE;
+		for (int32 i = 0; i < IntChannels.Num(); ++i)
+		{
+			if (IntMeta.IsValidIndex(i) && IntMeta[i].Name.ToString().Equals(ChannelName, ESearchCase::IgnoreCase)) { ChosenIdx = i; break; }
+		}
+		if (ChosenIdx == INDEX_NONE && IntChannels.Num() == 1) ChosenIdx = 0;
+		if (ChosenIdx != INDEX_NONE)
+		{
+			for (const TSharedPtr<FJsonValue>& KfVal : *Keyframes)
+			{
+				const TSharedPtr<FJsonObject>* Kf = nullptr;
+				if (!KfVal->TryGetObject(Kf) || !Kf) continue;
+				double Sec = 0.0, Val = 0.0;
+				(*Kf)->TryGetNumberField(TEXT("seconds"), Sec);
+				(*Kf)->TryGetNumberField(TEXT("value"), Val);
+				IntChannels[ChosenIdx]->GetData().AddKey(Tick.AsFrameNumber(Sec), static_cast<int32>(Val));
+				++KeysAdded;
+			}
+			bMatched = true;
+		}
+	}
+
+	if (!bMatched)
+	{
+		return MCPError(FString::Printf(TEXT("Channel '%s' not found on the section. For Transform use Location.X/Rotation.Z/etc or x/yaw; Color uses R/G/B/A; Visibility/Bool/Integer use their single channel."), *ChannelName));
 	}
 
 	Sequence->GetOutermost()->MarkPackageDirty();

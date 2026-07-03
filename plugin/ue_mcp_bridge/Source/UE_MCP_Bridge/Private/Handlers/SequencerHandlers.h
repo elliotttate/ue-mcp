@@ -19,4 +19,13 @@ private:
 	static TSharedPtr<FJsonValue> SetPlaybackRange(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AddSection(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetKeyframes(const TSharedPtr<FJsonObject>& Params);
+
+	// Movie Render Queue (SequencerHandlers_MRQ.cpp). The MovieRenderPipeline
+	// plugin is reached entirely through reflection (FindObject + ProcessEvent)
+	// so the bridge builds and loads without it; handlers fail with a clear
+	// "plugin not enabled" error instead of a link-time break.
+	static TSharedPtr<FJsonValue> MrqCreateJob(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> MrqRender(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> MrqStatus(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> MrqClear(const TSharedPtr<FJsonObject>& Params);
 };
