@@ -43,7 +43,7 @@ function findUEBuildTool() {
 
   // Same search roots as src/editor-control.ts so `npm run build` and the
   // server's editor control resolve the same engine install.
-  const versions = ['5.7', '5.6', '5.5', '5.4', '5.3'];
+  const versions = ['5.8', '5.7', '5.6', '5.5', '5.4', '5.3'];
   const basePaths = [
     'C:/Program Files/Epic Games',
     'D:/Program Files/Epic Games',
