@@ -128,6 +128,8 @@ private:
 	static TSharedPtr<FJsonValue> SetMeshNav(const TSharedPtr<FJsonObject>& Params);
 	// Package-bloat audit: largest packages by on-disk size, with per-class totals.
 	static TSharedPtr<FJsonValue> AnalyzeAssetSizes(const TSharedPtr<FJsonObject>& Params);
+	// Nanite/LOD/lightmap/collision-complexity configuration with mesh rebuild.
+	static TSharedPtr<FJsonValue> ConfigureStaticMesh(const TSharedPtr<FJsonObject>& Params);
 	// #212: create empty content browser folders
 	static TSharedPtr<FJsonValue> CreateFolder(const TSharedPtr<FJsonObject>& Params);
 	// Delete content browser folder(s) - empty by default; force=true also removes contained assets.

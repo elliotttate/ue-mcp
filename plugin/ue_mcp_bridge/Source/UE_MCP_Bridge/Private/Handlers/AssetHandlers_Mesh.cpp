@@ -737,3 +737,152 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetMeshNav(const TSharedPtr<FJsonObject>&
 // ---------------------------------------------------------------------------
 // v1.0.0-rc.3 — #192 move_folder
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// configure_static_mesh - Nanite, generated LODs, lightmap res, collision
+// complexity, LOD group. One PostEditChange/Build at the end regardless of
+// how many settings changed, because static mesh builds are expensive.
+// ---------------------------------------------------------------------------
+TSharedPtr<FJsonValue> FAssetHandlers::ConfigureStaticMesh(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
+	REQUIRE_ASSET(UStaticMesh, Mesh, AssetPath);
+
+	TArray<FString> Applied;
+	bool bNeedsBuild = false;
+
+	// Nanite toggle. Requires a mesh build to take effect, which generic
+	// property pokes cannot trigger - the reason this handler exists.
+	bool bNanite = false;
+	if (Params->TryGetBoolField(TEXT("nanite"), bNanite))
+	{
+		if (Mesh->NaniteSettings.bEnabled != bNanite)
+		{
+			Mesh->Modify();
+			Mesh->NaniteSettings.bEnabled = bNanite;
+			bNeedsBuild = true;
+		}
+		Applied.Add(FString::Printf(TEXT("nanite=%s"), bNanite ? TEXT("true") : TEXT("false")));
+	}
+
+	// Preset LOD group (applies the engine's per-group reduction chain).
+	const FString LodGroup = OptionalString(Params, TEXT("lodGroup"));
+	if (!LodGroup.IsEmpty())
+	{
+		Mesh->SetLODGroup(FName(*LodGroup), /*bRebuildImmediately*/ false);
+		bNeedsBuild = true;
+		Applied.Add(FString::Printf(TEXT("lodGroup=%s"), *LodGroup));
+	}
+
+	// Explicit generated-LOD chain: lodCount source models where LOD1+ reduce
+	// triangles from LOD0. Percentages come from lodPercentTriangles (0-1 per
+	// LOD) or default to halving per level.
+	const int32 LodCount = OptionalInt(Params, TEXT("lodCount"), 0);
+	if (LodCount > 0)
+	{
+		if (LodCount > 8) return MCPError(TEXT("lodCount must be 1-8"));
+		TArray<double> Percents;
+		const TArray<TSharedPtr<FJsonValue>>* PercentArr = nullptr;
+		if (Params->TryGetArrayField(TEXT("lodPercentTriangles"), PercentArr) && PercentArr)
+		{
+			for (const TSharedPtr<FJsonValue>& V : *PercentArr)
+			{
+				double Num = 0.0;
+				if (V.IsValid() && V->TryGetNumber(Num)) Percents.Add(Num);
+			}
+		}
+		Mesh->Modify();
+		Mesh->SetNumSourceModels(LodCount);
+		for (int32 LodIndex = 1; LodIndex < LodCount; LodIndex++)
+		{
+			FStaticMeshSourceModel& SourceModel = Mesh->GetSourceModel(LodIndex);
+			const double DefaultPercent = FMath::Pow(0.5, (double)LodIndex);
+			const double Percent = Percents.IsValidIndex(LodIndex)
+				? FMath::Clamp(Percents[LodIndex], 0.01, 1.0)
+				: DefaultPercent;
+			SourceModel.ReductionSettings.PercentTriangles = (float)Percent;
+		}
+		Mesh->bAutoComputeLODScreenSize = true;
+		bNeedsBuild = true;
+		Applied.Add(FString::Printf(TEXT("lodCount=%d"), LodCount));
+	}
+
+	const int32 LightmapResolution = OptionalInt(Params, TEXT("lightmapResolution"), 0);
+	if (LightmapResolution > 0)
+	{
+		Mesh->Modify();
+		Mesh->SetLightMapResolution(LightmapResolution);
+		Applied.Add(FString::Printf(TEXT("lightmapResolution=%d"), LightmapResolution));
+	}
+	const int32 LightmapCoordinateIndex = OptionalInt(Params, TEXT("lightmapCoordinateIndex"), -1);
+	if (LightmapCoordinateIndex >= 0)
+	{
+		Mesh->Modify();
+		Mesh->SetLightMapCoordinateIndex(LightmapCoordinateIndex);
+		Applied.Add(FString::Printf(TEXT("lightmapCoordinateIndex=%d"), LightmapCoordinateIndex));
+	}
+
+	const FString Collision = OptionalString(Params, TEXT("collisionComplexity"));
+	if (!Collision.IsEmpty())
+	{
+		ECollisionTraceFlag Flag;
+		if (Collision.Equals(TEXT("default"), ESearchCase::IgnoreCase))                  Flag = CTF_UseDefault;
+		else if (Collision.Equals(TEXT("simpleAndComplex"), ESearchCase::IgnoreCase))    Flag = CTF_UseSimpleAndComplex;
+		else if (Collision.Equals(TEXT("useSimpleAsComplex"), ESearchCase::IgnoreCase))  Flag = CTF_UseSimpleAsComplex;
+		else if (Collision.Equals(TEXT("useComplexAsSimple"), ESearchCase::IgnoreCase))  Flag = CTF_UseComplexAsSimple;
+		else return MCPError(TEXT("collisionComplexity must be one of: default, simpleAndComplex, useSimpleAsComplex, useComplexAsSimple"));
+
+		if (!Mesh->GetBodySetup()) Mesh->CreateBodySetup();
+		UBodySetup* BodySetup = Mesh->GetBodySetup();
+		if (!BodySetup) return MCPError(TEXT("Failed to create BodySetup on mesh"));
+		BodySetup->Modify();
+		BodySetup->CollisionTraceFlag = Flag;
+		BodySetup->InvalidatePhysicsData();
+		BodySetup->CreatePhysicsMeshes();
+		Applied.Add(FString::Printf(TEXT("collisionComplexity=%s"), *Collision));
+	}
+
+	if (Applied.Num() == 0)
+	{
+		return MCPError(TEXT("No settings supplied. Provide at least one of: nanite, lodGroup, lodCount, lodPercentTriangles, lightmapResolution, lightmapCoordinateIndex, collisionComplexity"));
+	}
+
+	if (bNeedsBuild)
+	{
+		// Single silent build covering every change above.
+		Mesh->Build(/*bInSilent*/ true);
+	}
+	Mesh->PostEditChange();
+	Mesh->MarkPackageDirty();
+
+	bool bSaved = false;
+	if (OptionalBool(Params, TEXT("save"), true))
+	{
+		bSaved = SaveAssetPackage(Mesh);
+	}
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("assetPath"), Mesh->GetPathName());
+	TArray<TSharedPtr<FJsonValue>> AppliedJson;
+	for (const FString& Item : Applied) AppliedJson.Add(MakeShared<FJsonValueString>(Item));
+	Result->SetArrayField(TEXT("applied"), AppliedJson);
+	Result->SetBoolField(TEXT("rebuilt"), bNeedsBuild);
+	Result->SetBoolField(TEXT("saved"), bSaved);
+	Result->SetBoolField(TEXT("naniteEnabled"), Mesh->NaniteSettings.bEnabled);
+	Result->SetNumberField(TEXT("lodCount"), Mesh->GetNumSourceModels());
+	if (const UBodySetup* BodySetup = Mesh->GetBodySetup())
+	{
+		const TCHAR* FlagName = TEXT("default");
+		switch (BodySetup->CollisionTraceFlag)
+		{
+		case CTF_UseSimpleAndComplex:   FlagName = TEXT("simpleAndComplex"); break;
+		case CTF_UseSimpleAsComplex:    FlagName = TEXT("useSimpleAsComplex"); break;
+		case CTF_UseComplexAsSimple:    FlagName = TEXT("useComplexAsSimple"); break;
+		default: break;
+		}
+		Result->SetStringField(TEXT("collisionComplexity"), FlagName);
+	}
+	return MCPResult(Result);
+}

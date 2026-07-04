@@ -268,6 +268,7 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("create_folder"), &CreateFolder);
 	Registry.RegisterHandler(TEXT("delete_folder"), &DeleteFolder);
 	Registry.RegisterHandler(TEXT("analyze_asset_sizes"), &AnalyzeAssetSizes);
+	Registry.RegisterHandler(TEXT("configure_static_mesh"), &ConfigureStaticMesh);
 }
 
 // ---------------------------------------------------------------------------
