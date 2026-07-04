@@ -126,6 +126,8 @@ private:
 	static TSharedPtr<FJsonValue> GetMeshCollision(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> MoveFolder(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetMeshNav(const TSharedPtr<FJsonObject>& Params);
+	// Package-bloat audit: largest packages by on-disk size, with per-class totals.
+	static TSharedPtr<FJsonValue> AnalyzeAssetSizes(const TSharedPtr<FJsonObject>& Params);
 	// #212: create empty content browser folders
 	static TSharedPtr<FJsonValue> CreateFolder(const TSharedPtr<FJsonObject>& Params);
 	// Delete content browser folder(s) - empty by default; force=true also removes contained assets.

@@ -267,6 +267,7 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("move_folder"), &MoveFolder);
 	Registry.RegisterHandler(TEXT("create_folder"), &CreateFolder);
 	Registry.RegisterHandler(TEXT("delete_folder"), &DeleteFolder);
+	Registry.RegisterHandler(TEXT("analyze_asset_sizes"), &AnalyzeAssetSizes);
 }
 
 // ---------------------------------------------------------------------------
@@ -2792,5 +2793,125 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateInterchangePipeline(const TSharedPt
 	Result->SetNumberField(TEXT("overridesApplied"), OverridesApplied);
 	if (OverrideFailures.Num() > 0) Result->SetArrayField(TEXT("overrideFailures"), OverrideFailures);
 	MCPSetDeleteAssetRollback(Result, NewAsset->GetPathName());
+	return MCPResult(Result);
+}
+
+// Package-bloat audit. Walks the AssetRegistry under 'path' (default /Game),
+// resolves each package's on-disk size (registry DiskSize, falling back to
+// the file size), and returns the top-N largest packages plus cumulative
+// per-class totals. Registry-only: no asset loads, so it is safe to run on
+// large projects. Params: path?, classFilter? (substring), topN? (default 50).
+TSharedPtr<FJsonValue> FAssetHandlers::AnalyzeAssetSizes(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString Path = OptionalString(Params, TEXT("path"), TEXT("/Game"));
+	const FString ClassFilter = OptionalString(Params, TEXT("classFilter"));
+	const int32 TopN = FMath::Clamp(OptionalInt(Params, TEXT("topN"), 50), 1, 500);
+
+	FAssetRegistryModule& RegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+	IAssetRegistry& Registry = RegistryModule.Get();
+
+	FARFilter Filter;
+	Filter.PackagePaths.Add(FName(*Path));
+	Filter.bRecursivePaths = true;
+	TArray<FAssetData> Assets;
+	Registry.GetAssets(Filter, Assets);
+
+	// One package can hold several assets; attribute the package to its first
+	// asset (the primary one for single-asset packages, which is the norm).
+	struct FPackageRow
+	{
+		FString AssetName;
+		FString AssetClass;
+		int32 AssetCount = 0;
+		int64 DiskSize = -1;
+	};
+	TMap<FName, FPackageRow> Packages;
+	for (const FAssetData& Asset : Assets)
+	{
+		const FString ClassName = Asset.AssetClassPath.GetAssetName().ToString();
+		if (!ClassFilter.IsEmpty() && !ClassName.Contains(ClassFilter, ESearchCase::IgnoreCase)) continue;
+		FPackageRow& Row = Packages.FindOrAdd(Asset.PackageName);
+		Row.AssetCount++;
+		if (Row.AssetName.IsEmpty())
+		{
+			Row.AssetName = Asset.AssetName.ToString();
+			Row.AssetClass = ClassName;
+		}
+	}
+
+	int64 TotalBytes = 0;
+	int32 UnknownSizeCount = 0;
+	TArray<TPair<FName, FPackageRow>> Rows;
+	Rows.Reserve(Packages.Num());
+	for (TPair<FName, FPackageRow>& Pair : Packages)
+	{
+		TOptional<FAssetPackageData> PackageData = Registry.GetAssetPackageDataCopy(Pair.Key);
+		int64 Size = PackageData.IsSet() ? PackageData->DiskSize : -1;
+		if (Size < 0)
+		{
+			FString Filename;
+			if (FPackageName::DoesPackageExist(Pair.Key.ToString(), &Filename))
+			{
+				Size = IFileManager::Get().FileSize(*Filename);
+			}
+		}
+		Pair.Value.DiskSize = Size;
+		if (Size > 0) TotalBytes += Size; else UnknownSizeCount++;
+		Rows.Add(Pair);
+	}
+	Rows.Sort([](const TPair<FName, FPackageRow>& A, const TPair<FName, FPackageRow>& B)
+	{
+		return A.Value.DiskSize > B.Value.DiskSize;
+	});
+
+	TArray<TSharedPtr<FJsonValue>> RowJson;
+	for (int32 i = 0; i < Rows.Num() && i < TopN; i++)
+	{
+		const FPackageRow& Row = Rows[i].Value;
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("packageName"), Rows[i].Key.ToString());
+		Obj->SetStringField(TEXT("assetName"), Row.AssetName);
+		Obj->SetStringField(TEXT("assetClass"), Row.AssetClass);
+		if (Row.AssetCount > 1) Obj->SetNumberField(TEXT("assetCount"), Row.AssetCount);
+		Obj->SetNumberField(TEXT("diskSizeBytes"), (double)Row.DiskSize);
+		Obj->SetNumberField(TEXT("diskSizeMB"), FMath::RoundToDouble(Row.DiskSize / 1048.576) / 1000.0);
+		RowJson.Add(MakeShared<FJsonValueObject>(Obj));
+	}
+
+	// Cumulative bytes per asset class, largest first: answers "what kind of
+	// content is inflating the project" at a glance.
+	TMap<FString, TPair<int64, int32>> ClassTotals;
+	for (const TPair<FName, FPackageRow>& Pair : Rows)
+	{
+		if (Pair.Value.DiskSize <= 0) continue;
+		TPair<int64, int32>& Total = ClassTotals.FindOrAdd(Pair.Value.AssetClass);
+		Total.Key += Pair.Value.DiskSize;
+		Total.Value++;
+	}
+	TArray<TPair<FString, TPair<int64, int32>>> ClassRows;
+	for (TPair<FString, TPair<int64, int32>>& Pair : ClassTotals) ClassRows.Add(Pair);
+	ClassRows.Sort([](const TPair<FString, TPair<int64, int32>>& A, const TPair<FString, TPair<int64, int32>>& B)
+	{
+		return A.Value.Key > B.Value.Key;
+	});
+	TArray<TSharedPtr<FJsonValue>> ClassJson;
+	for (int32 i = 0; i < ClassRows.Num() && i < 20; i++)
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("assetClass"), ClassRows[i].Key);
+		Obj->SetNumberField(TEXT("packageCount"), ClassRows[i].Value.Value);
+		Obj->SetNumberField(TEXT("totalBytes"), (double)ClassRows[i].Value.Key);
+		Obj->SetNumberField(TEXT("totalMB"), FMath::RoundToDouble(ClassRows[i].Value.Key / 1048.576) / 1000.0);
+		ClassJson.Add(MakeShared<FJsonValueObject>(Obj));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("path"), Path);
+	Result->SetNumberField(TEXT("packageCount"), Rows.Num());
+	Result->SetNumberField(TEXT("totalBytes"), (double)TotalBytes);
+	Result->SetNumberField(TEXT("totalMB"), FMath::RoundToDouble(TotalBytes / 1048.576) / 1000.0);
+	if (UnknownSizeCount > 0) Result->SetNumberField(TEXT("unknownSizeCount"), UnknownSizeCount);
+	Result->SetArrayField(TEXT("largestPackages"), RowJson);
+	Result->SetArrayField(TEXT("classTotals"), ClassJson);
 	return MCPResult(Result);
 }

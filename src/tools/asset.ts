@@ -133,6 +133,7 @@ export const assetTool: ToolDef = categoryTool(
     create_folder:        bp("Create empty content browser folder(s). Params: path OR paths[] (e.g. /Game/Foo, /Game/Bar/Baz). Returns per-path created/existed/failed (#212)", "create_folder", (p) => ({ path: p.path, paths: p.paths })),
     delete_folder:        bp("Delete content browser folder(s) - counterpart to delete_asset, which leaves the parent directory entry behind as an orphan. Empty folders only by default; pass force=true to also delete any assets still inside (Content Browser 'Delete folder' equivalent). Per-path status (deleted/absent/failed) with reason (invalid_path/protected_path/not_empty/delete_failed) and a sample of contained assets on not_empty entries. Params: path OR paths[], force?", "delete_folder", (p) => ({ path: p.path, paths: p.paths, force: p.force })),
     set_mesh_nav:         bp("Set StaticMesh nav contribution. Params: assetPath, bHasNavigationData?, clearNavCollision? (#167)", "set_mesh_nav"),
+    analyze_sizes:        bp("Package-bloat audit: top-N largest packages by on-disk size under a path, plus cumulative per-class totals (what kind of content is inflating the project). Registry-only, no asset loads. Params: path? (default /Game), classFilter? (substring), topN? (default 50)", "analyze_asset_sizes", (p) => ({ path: p.path, classFilter: p.classFilter, topN: p.topN })),
   },
   undefined,
   {
@@ -216,7 +217,8 @@ export const assetTool: ToolDef = categoryTool(
     relativeRotation: Rotator.optional().describe("Socket relative rotation"),
     relativeScale: Vec3.optional().describe("Socket relative scale"),
     outputPath: z.string().optional().describe("Absolute file path for export (e.g. C:/output/texture.png)"),
-    classFilter: z.string().optional().describe("Restrict search_fts to assets whose class name contains this substring"),
+    classFilter: z.string().optional().describe("Restrict search_fts / analyze_sizes to assets whose class name contains this substring"),
+    topN: z.number().optional().describe("analyze_sizes: number of largest packages to return (default 50)"),
     className: z.string().optional().describe("UClass path (/Script/Module.ClassName) or loaded class name for create_data_asset"),
     properties: z.record(z.unknown()).optional().describe("Key/value property overrides for create_data_asset"),
     packages: z.array(z.string()).optional().describe("Package paths for get_referencers / get_dependencies"),
