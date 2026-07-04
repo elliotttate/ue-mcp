@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { categoryTool, bp, directive, type ToolDef, type ToolContext } from "../types.js";
 import { startEditor, stopEditor, restartEditor, buildProject } from "../editor-control.js";
+import { startPackageProject, getPackageStatus, cancelPackageJob } from "../packaging.js";
 import { pushWorkaround, workaroundCount } from "../workaround-tracker.js";
 import { Vec3, Rotator } from "../schemas.js";
 import { McpError, ErrorCode } from "../errors.js";
@@ -201,6 +202,24 @@ export const editorTool: ToolDef = categoryTool(
     validate_assets: bp("Run data validation. Params: directory?", "validate_assets"),
     get_build_status: bp("Get build/map status", "get_build_status"),
     cook_content: bp("Cook content. Params: platform?", "cook_content"),
+    package_project: {
+      description: "Package the project via UAT BuildCookRun (build + cook + stage + pak + archive) as a background job - typically 10-60 minutes. Returns immediately; poll get_package_status. Params: platform? (default Win64), configuration? (default Development), archiveDirectory? (default Saved/MCP/Packages/<platform>), maps? (limit cooked maps), pak? (default true), clean?",
+      handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
+        return startPackageProject(ctx.project, p);
+      },
+    },
+    get_package_status: {
+      description: "Poll the background packaging job: stage (build/cook/stage/pak/archive/done/failed), elapsed, exit code, and the UAT log tail. Params: tailLines? (default 25)",
+      handler: async (_ctx: ToolContext, p: Record<string, unknown>) => {
+        return getPackageStatus(p);
+      },
+    },
+    cancel_package: {
+      description: "Cancel the running packaging job (kills the UAT process tree)",
+      handler: async () => {
+        return cancelPackageJob();
+      },
+    },
     get_log: bp("Read output log. Params: maxLines?, filter?, category?", "get_output_log"),
     search_log: bp("Search log. Params: query", "search_log"),
     get_message_log: bp("Read message log. Params: logName?", "get_message_log"),
@@ -271,6 +290,12 @@ export const editorTool: ToolDef = categoryTool(
     sequenceAction: z.enum(["play", "stop", "pause"]).optional(),
     directory: z.string().optional(),
     platform: z.string().optional(),
+    configuration: z.string().optional().describe("package_project: Debug | Development | Test | Shipping (default Development)"),
+    archiveDirectory: z.string().optional().describe("package_project: where the packaged build is archived (default Saved/MCP/Packages/<platform>)"),
+    maps: z.array(z.string()).optional().describe("package_project: restrict cooking to these maps"),
+    pak: z.boolean().optional().describe("package_project: produce .pak files (default true)"),
+    clean: z.boolean().optional().describe("package_project: clean before building"),
+    tailLines: z.number().optional().describe("get_package_status: UAT log tail lines to return (default 25)"),
     maxLines: z.number().optional(),
     filter: z.string().optional(),
     filters: z.array(z.string()).optional().describe("run_automation_tests: multiple name substrings (a test matching any runs)"),
