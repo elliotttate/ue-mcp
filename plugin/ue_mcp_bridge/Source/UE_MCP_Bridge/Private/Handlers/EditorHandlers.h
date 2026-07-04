@@ -152,6 +152,10 @@ private:
 	static TSharedPtr<FJsonValue> SetScalability(const TSharedPtr<FJsonObject>& Params);
 	// #591 bulk console-variable setter
 	static TSharedPtr<FJsonValue> SetCVars(const TSharedPtr<FJsonObject>& Params);
+	// Console-variable readback: value + help + flags for one or more cvars.
+	static TSharedPtr<FJsonValue> GetCVar(const TSharedPtr<FJsonObject>& Params);
+	// Enumerate console variables/commands by name prefix or substring.
+	static TSharedPtr<FJsonValue> DiscoverCVars(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> BuildGeometry(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> BuildHlod(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ListCrashes(const TSharedPtr<FJsonObject>& Params);

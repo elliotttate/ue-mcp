@@ -180,6 +180,8 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("run_stat_command"), &RunStatCommand);
 	Registry.RegisterHandler(TEXT("set_scalability"), &SetScalability);
 	Registry.RegisterHandler(TEXT("set_cvars"), &SetCVars);
+	Registry.RegisterHandler(TEXT("get_cvar"), &GetCVar);
+	Registry.RegisterHandler(TEXT("discover_cvars"), &DiscoverCVars);
 	Registry.RegisterHandler(TEXT("build_geometry"), &BuildGeometry);
 	Registry.RegisterHandler(TEXT("build_hlod"), &BuildHlod);
 	Registry.RegisterHandler(TEXT("list_crashes"), &ListCrashes);
@@ -1626,6 +1628,157 @@ TSharedPtr<FJsonValue> FEditorHandlers::SetCVars(const TSharedPtr<FJsonObject>& 
 	if (NotFound.Num() > 0) Result->SetArrayField(TEXT("notFound"), NotFound);
 	return MCPResult(Result);
 }
+
+namespace
+{
+	FString CVarTypeLabel(IConsoleVariable* CVar)
+	{
+		if (CVar->IsVariableBool())   return TEXT("bool");
+		if (CVar->IsVariableInt())    return TEXT("int");
+		if (CVar->IsVariableFloat())  return TEXT("float");
+		if (CVar->IsVariableString()) return TEXT("string");
+		return TEXT("unknown");
+	}
+
+	// Help strings can run to whole paragraphs; keep the wire payload compact.
+	FString CVarHelpOneLine(const TCHAR* Help, int32 MaxLen = 300)
+	{
+		FString Text = Help ? FString(Help) : FString();
+		int32 NewlineIdx = INDEX_NONE;
+		if (Text.FindChar(TEXT('\n'), NewlineIdx)) Text.LeftInline(NewlineIdx);
+		Text.TrimStartAndEndInline();
+		if (Text.Len() > MaxLen) Text = Text.Left(MaxLen) + TEXT("...");
+		return Text;
+	}
+
+	TSharedPtr<FJsonObject> DescribeCVar(const FString& Name, IConsoleVariable* CVar, bool bIncludeHelp)
+	{
+		TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+		Row->SetStringField(TEXT("name"), Name);
+		Row->SetStringField(TEXT("value"), CVar->GetString());
+		Row->SetStringField(TEXT("type"), CVarTypeLabel(CVar));
+		Row->SetStringField(TEXT("setBy"), GetConsoleVariableSetByName(
+			(EConsoleVariableFlags)((uint32)CVar->GetFlags() & ECVF_SetByMask)));
+		Row->SetBoolField(TEXT("readOnly"), CVar->TestFlags(ECVF_ReadOnly));
+		if (bIncludeHelp) Row->SetStringField(TEXT("help"), CVarHelpOneLine(CVar->GetHelp()));
+		return Row;
+	}
+}
+
+// Console-variable readback. Params: name (string) or names (string array).
+// Returns value/type/setBy/readOnly/help per cvar plus a notFound list, so
+// agents can confirm a set_cvars write took effect or inspect defaults.
+TSharedPtr<FJsonValue> FEditorHandlers::GetCVar(const TSharedPtr<FJsonObject>& Params)
+{
+	TArray<FString> Names;
+	FString SingleName;
+	if (Params->TryGetStringField(TEXT("name"), SingleName) && !SingleName.IsEmpty())
+	{
+		Names.Add(SingleName);
+	}
+	const TArray<TSharedPtr<FJsonValue>>* NamesArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("names"), NamesArr))
+	{
+		Names.Append(JsonArrayToStringList(NamesArr));
+	}
+	if (Names.Num() == 0) return MCPError(TEXT("Supply 'name' or 'names'"));
+
+	IConsoleManager& CM = IConsoleManager::Get();
+	TArray<TSharedPtr<FJsonValue>> Rows;
+	TArray<TSharedPtr<FJsonValue>> NotFound;
+	for (const FString& Name : Names)
+	{
+		IConsoleVariable* CVar = CM.FindConsoleVariable(*Name);
+		if (!CVar)
+		{
+			NotFound.Add(MakeShared<FJsonValueString>(Name));
+			continue;
+		}
+		Rows.Add(MakeShared<FJsonValueObject>(DescribeCVar(Name, CVar, /*bIncludeHelp*/ true)));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetArrayField(TEXT("cvars"), Rows);
+	Result->SetNumberField(TEXT("foundCount"), Rows.Num());
+	if (NotFound.Num() > 0) Result->SetArrayField(TEXT("notFound"), NotFound);
+	return MCPResult(Result);
+}
+
+// Enumerate console variables (and optionally commands) whose names start
+// with 'prefix' or contain 'contains'. Params: prefix? | contains?,
+// includeCommands? (default false), includeHelp? (default true),
+// limit? (default 200). Results are name-sorted and truncated to limit.
+TSharedPtr<FJsonValue> FEditorHandlers::DiscoverCVars(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString Prefix = OptionalString(Params, TEXT("prefix"));
+	const FString Contains = OptionalString(Params, TEXT("contains"));
+	if (Prefix.IsEmpty() && Contains.IsEmpty())
+	{
+		return MCPError(TEXT("Supply 'prefix' (e.g. r.Lumen) or 'contains'"));
+	}
+	const bool bIncludeCommands = OptionalBool(Params, TEXT("includeCommands"), false);
+	const bool bIncludeHelp = OptionalBool(Params, TEXT("includeHelp"), true);
+	const int32 Limit = FMath::Clamp(OptionalInt(Params, TEXT("limit"), 200), 1, 2000);
+
+	struct FEntry
+	{
+		FString Name;
+		IConsoleObject* Object = nullptr;
+	};
+	TArray<FEntry> Entries;
+	IConsoleManager& CM = IConsoleManager::Get();
+	FConsoleObjectVisitor Visitor = FConsoleObjectVisitor::CreateLambda(
+		[&Entries](const TCHAR* Name, IConsoleObject* Obj)
+		{
+			Entries.Add({ FString(Name), Obj });
+		});
+	if (!Prefix.IsEmpty())
+	{
+		CM.ForEachConsoleObjectThatStartsWith(Visitor, *Prefix);
+	}
+	else
+	{
+		CM.ForEachConsoleObjectThatContains(Visitor, *Contains);
+	}
+	Entries.Sort([](const FEntry& A, const FEntry& B) { return A.Name < B.Name; });
+
+	int32 VariableCount = 0;
+	int32 CommandCount = 0;
+	TArray<TSharedPtr<FJsonValue>> Rows;
+	for (const FEntry& Entry : Entries)
+	{
+		if (!Entry.Object) continue;
+		IConsoleVariable* CVar = Entry.Object->AsVariable();
+		if (CVar)
+		{
+			VariableCount++;
+			if (Rows.Num() < Limit)
+			{
+				Rows.Add(MakeShared<FJsonValueObject>(DescribeCVar(Entry.Name, CVar, bIncludeHelp)));
+			}
+		}
+		else if (bIncludeCommands)
+		{
+			CommandCount++;
+			if (Rows.Num() < Limit)
+			{
+				TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+				Row->SetStringField(TEXT("name"), Entry.Name);
+				Row->SetStringField(TEXT("type"), TEXT("command"));
+				if (bIncludeHelp) Row->SetStringField(TEXT("help"), CVarHelpOneLine(Entry.Object->GetHelp()));
+				Rows.Add(MakeShared<FJsonValueObject>(Row));
+			}
+		}
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetArrayField(TEXT("cvars"), Rows);
+	Result->SetNumberField(TEXT("matchedVariables"), VariableCount);
+	if (bIncludeCommands) Result->SetNumberField(TEXT("matchedCommands"), CommandCount);
+	Result->SetBoolField(TEXT("truncated"), (VariableCount + (bIncludeCommands ? CommandCount : 0)) > Rows.Num());
+	return MCPResult(Result);
+}
+
 TSharedPtr<FJsonValue> FEditorHandlers::ListCrashes(const TSharedPtr<FJsonObject>& Params)
 {
 	FString CrashesDir = FPaths::ProjectSavedDir() / TEXT("Crashes");
