@@ -1607,6 +1607,195 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ExportNodesT3D(const TSharedPtr<FJson
 }
 
 
+// Compact connection report: what got wired, what dangles. Labels are
+// "Title#abcd" (last 4 guid hex) so duplicate titles stay distinguishable
+// while the payload stays a fraction of a full read_graph dump.
+TSharedPtr<FJsonObject> BuildCompactConnectionReport(const TArray<UEdGraphNode*>& Nodes)
+{
+	TSet<const UEdGraphNode*> InSet;
+	for (const UEdGraphNode* Node : Nodes) InSet.Add(Node);
+
+	auto NodeLabel = [](const UEdGraphNode* Node)
+	{
+		FString Title = Node->GetNodeTitle(ENodeTitleType::ListView).ToString().Replace(TEXT("\n"), TEXT(" "));
+		return FString::Printf(TEXT("%s#%s"), *Title, *Node->NodeGuid.ToString().Right(4));
+	};
+
+	TArray<TSharedPtr<FJsonValue>> NodeRows;
+	TArray<TSharedPtr<FJsonValue>> ExecLinks;
+	TArray<TSharedPtr<FJsonValue>> DataLinks;
+	TArray<TSharedPtr<FJsonValue>> OpenExecOutputs;
+	TArray<TSharedPtr<FJsonValue>> UnsetDataInputs;
+
+	for (UEdGraphNode* Node : Nodes)
+	{
+		if (!Node) continue;
+		TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+		Row->SetStringField(TEXT("label"), NodeLabel(Node));
+		Row->SetStringField(TEXT("guid"), Node->NodeGuid.ToString());
+		Row->SetStringField(TEXT("class"), Node->GetClass()->GetName());
+		NodeRows.Add(MakeShared<FJsonValueObject>(Row));
+
+		for (UEdGraphPin* Pin : Node->Pins)
+		{
+			if (!Pin || Pin->bHidden) continue;
+			const bool bExec = Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec;
+
+			if (Pin->Direction == EGPD_Output)
+			{
+				if (Pin->LinkedTo.Num() == 0)
+				{
+					if (bExec)
+					{
+						OpenExecOutputs.Add(MakeShared<FJsonValueString>(
+							FString::Printf(TEXT("%s.%s"), *NodeLabel(Node), *Pin->PinName.ToString())));
+					}
+					continue;
+				}
+				for (UEdGraphPin* Linked : Pin->LinkedTo)
+				{
+					if (!Linked || !Linked->GetOwningNode()) continue;
+					const FString Link = FString::Printf(TEXT("%s.%s -> %s.%s"),
+						*NodeLabel(Node), *Pin->PinName.ToString(),
+						*NodeLabel(Linked->GetOwningNode()), *Linked->PinName.ToString());
+					(bExec ? ExecLinks : DataLinks).Add(MakeShared<FJsonValueString>(Link));
+				}
+			}
+			else // inputs
+			{
+				if (Pin->LinkedTo.Num() > 0)
+				{
+					// Links from nodes outside the created set would be missed
+					// by the output-side walk above; emit them here.
+					for (UEdGraphPin* Linked : Pin->LinkedTo)
+					{
+						UEdGraphNode* Source = Linked ? Linked->GetOwningNode() : nullptr;
+						if (!Source || InSet.Contains(Source)) continue;
+						const FString Link = FString::Printf(TEXT("%s.%s -> %s.%s"),
+							*NodeLabel(Source), *Linked->PinName.ToString(),
+							*NodeLabel(Node), *Pin->PinName.ToString());
+						(bExec ? ExecLinks : DataLinks).Add(MakeShared<FJsonValueString>(Link));
+					}
+					continue;
+				}
+				// Self pins default to self; exec inputs on events are entry points.
+				if (bExec || Pin->PinName == UEdGraphSchema_K2::PN_Self) continue;
+				const bool bHasDefault = !Pin->DefaultValue.IsEmpty()
+					|| Pin->DefaultObject != nullptr
+					|| !Pin->DefaultTextValue.IsEmpty();
+				if (!bHasDefault)
+				{
+					UnsetDataInputs.Add(MakeShared<FJsonValueString>(FString::Printf(
+						TEXT("%s.%s (%s)"),
+						*NodeLabel(Node), *Pin->PinName.ToString(),
+						*Pin->PinType.PinCategory.ToString())));
+				}
+			}
+		}
+	}
+
+	TSharedPtr<FJsonObject> Report = MakeShared<FJsonObject>();
+	Report->SetArrayField(TEXT("nodes"), NodeRows);
+	Report->SetArrayField(TEXT("execConnections"), ExecLinks);
+	Report->SetArrayField(TEXT("dataConnections"), DataLinks);
+	if (OpenExecOutputs.Num() > 0) Report->SetArrayField(TEXT("openExecOutputs"), OpenExecOutputs);
+	if (UnsetDataInputs.Num() > 0) Report->SetArrayField(TEXT("unsetDataInputs"), UnsetDataInputs);
+	return Report;
+}
+
+namespace
+{
+	// Pre-flight scan of T3D text against reflection: unknown node classes and
+	// unresolvable function references get caught before any mutation happens.
+	void PreflightT3D(
+		const FString& T3D,
+		UClass* SelfClass,
+		int32& OutNodeCount,
+		TArray<FString>& OutUnknownClasses,
+		TArray<FString>& OutUnknownFunctions)
+	{
+		OutNodeCount = 0;
+
+		// "Begin Object Class=/Script/BlueprintGraph.K2Node_CallFunction Name=..."
+		TArray<FString> Lines;
+		T3D.ParseIntoArrayLines(Lines);
+		for (FString& Line : Lines)
+		{
+			Line.TrimStartInline();
+			if (!Line.StartsWith(TEXT("Begin Object"))) continue;
+			OutNodeCount++;
+			int32 ClassIdx = Line.Find(TEXT("Class="));
+			if (ClassIdx == INDEX_NONE) continue;
+			FString ClassPath = Line.Mid(ClassIdx + 6);
+			int32 SpaceIdx = INDEX_NONE;
+			if (ClassPath.FindChar(TEXT(' '), SpaceIdx)) ClassPath.LeftInline(SpaceIdx);
+			ClassPath.TrimQuotesInline();
+			if (ClassPath.IsEmpty()) continue;
+			UClass* NodeClass = FindObject<UClass>(nullptr, *ClassPath);
+			if (!NodeClass) NodeClass = LoadObject<UClass>(nullptr, *ClassPath);
+			if (!NodeClass) OutUnknownClasses.AddUnique(ClassPath);
+		}
+
+		// FunctionReference=(MemberParent="/Script/CoreUObject.Class'\"/Script/Engine.KismetSystemLibrary\"'",MemberName="PrintString",...)
+		int32 SearchIdx = 0;
+		while (true)
+		{
+			int32 RefIdx = T3D.Find(TEXT("FunctionReference=("), ESearchCase::CaseSensitive, ESearchDir::FromStart, SearchIdx);
+			if (RefIdx == INDEX_NONE) break;
+			int32 CloseIdx = T3D.Find(TEXT(")"), ESearchCase::CaseSensitive, ESearchDir::FromStart, RefIdx);
+			if (CloseIdx == INDEX_NONE) break;
+			const FString Ref = T3D.Mid(RefIdx, CloseIdx - RefIdx + 1);
+			SearchIdx = CloseIdx;
+
+			FString MemberName;
+			{
+				int32 NameIdx = Ref.Find(TEXT("MemberName=\""));
+				if (NameIdx != INDEX_NONE)
+				{
+					MemberName = Ref.Mid(NameIdx + 12);
+					int32 EndQuote = INDEX_NONE;
+					if (MemberName.FindChar(TEXT('"'), EndQuote)) MemberName.LeftInline(EndQuote);
+				}
+			}
+			if (MemberName.IsEmpty()) continue;
+
+			UClass* ParentClass = SelfClass; // self-context call when MemberParent is absent
+			FString ParentPath;
+			{
+				// The class path sits between single quotes, itself often
+				// wrapped in escaped double quotes.
+				int32 ParentIdx = Ref.Find(TEXT("MemberParent="));
+				if (ParentIdx != INDEX_NONE)
+				{
+					int32 FirstTick = Ref.Find(TEXT("'"), ESearchCase::CaseSensitive, ESearchDir::FromStart, ParentIdx);
+					int32 LastTick = FirstTick == INDEX_NONE ? INDEX_NONE
+						: Ref.Find(TEXT("'"), ESearchCase::CaseSensitive, ESearchDir::FromStart, FirstTick + 1);
+					if (FirstTick != INDEX_NONE && LastTick != INDEX_NONE)
+					{
+						ParentPath = Ref.Mid(FirstTick + 1, LastTick - FirstTick - 1);
+						ParentPath.ReplaceInline(TEXT("\\\""), TEXT(""));
+						ParentPath.TrimQuotesInline();
+						ParentClass = FindObject<UClass>(nullptr, *ParentPath);
+						if (!ParentClass) ParentClass = LoadObject<UClass>(nullptr, *ParentPath);
+						if (!ParentClass)
+						{
+							OutUnknownClasses.AddUnique(ParentPath);
+							continue;
+						}
+					}
+				}
+			}
+			if (ParentClass && !ParentClass->FindFunctionByName(FName(*MemberName)))
+			{
+				OutUnknownFunctions.AddUnique(FString::Printf(
+					TEXT("%s::%s"),
+					ParentPath.IsEmpty() ? TEXT("(self)") : *ParentPath,
+					*MemberName));
+			}
+		}
+	}
+}
+
 TSharedPtr<FJsonValue> FBlueprintHandlers::ImportNodesT3D(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
@@ -1633,7 +1822,32 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ImportNodesT3D(const TSharedPtr<FJson
 		return MCPError(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
 	}
 
-	if (!FEdGraphUtilities::CanImportNodesFromText(TargetGraph, T3D))
+	// Pre-flight: dry-run the T3D's class and function references against
+	// reflection before touching the graph. validateOnly returns the findings
+	// without mutating; a real import surfaces them as warnings (name
+	// redirects can still resolve some at reconstruct time).
+	const bool bCanImport = FEdGraphUtilities::CanImportNodesFromText(TargetGraph, T3D);
+	int32 PreflightNodeCount = 0;
+	TArray<FString> UnknownClasses;
+	TArray<FString> UnknownFunctions;
+	PreflightT3D(T3D, Blueprint->GeneratedClass, PreflightNodeCount, UnknownClasses, UnknownFunctions);
+
+	if (OptionalBool(Params, TEXT("validateOnly"), false))
+	{
+		auto Validation = MCPSuccess();
+		Validation->SetBoolField(TEXT("validated"), true);
+		Validation->SetBoolField(TEXT("canImport"), bCanImport);
+		Validation->SetBoolField(TEXT("valid"), bCanImport && UnknownClasses.Num() == 0 && UnknownFunctions.Num() == 0);
+		Validation->SetNumberField(TEXT("nodeCount"), PreflightNodeCount);
+		TArray<TSharedPtr<FJsonValue>> UC, UF;
+		for (const FString& S : UnknownClasses) UC.Add(MakeShared<FJsonValueString>(S));
+		for (const FString& S : UnknownFunctions) UF.Add(MakeShared<FJsonValueString>(S));
+		if (UC.Num() > 0) Validation->SetArrayField(TEXT("unknownClasses"), UC);
+		if (UF.Num() > 0) Validation->SetArrayField(TEXT("unknownFunctions"), UF);
+		return MCPResult(Validation);
+	}
+
+	if (!bCanImport)
 	{
 		return MCPError(TEXT("T3D text is not importable into this graph (schema mismatch or malformed)"));
 	}
@@ -1698,6 +1912,18 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ImportNodesT3D(const TSharedPtr<FJson
 	Result->SetStringField(TEXT("graphName"), GraphName);
 	Result->SetArrayField(TEXT("nodeIds"), NodeIds);
 	Result->SetNumberField(TEXT("count"), NodeIds.Num());
+	if (UnknownClasses.Num() > 0 || UnknownFunctions.Num() > 0)
+	{
+		TArray<TSharedPtr<FJsonValue>> Warnings;
+		for (const FString& S : UnknownClasses)
+			Warnings.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("unknown class: %s"), *S)));
+		for (const FString& S : UnknownFunctions)
+			Warnings.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("unknown function: %s"), *S)));
+		Result->SetArrayField(TEXT("warnings"), Warnings);
+	}
+	// Inline wiring verification replaces the read_graph round-trip agents
+	// otherwise need after every injection.
+	Result->SetObjectField(TEXT("report"), BuildCompactConnectionReport(PastedNodes.Array()));
 	// No rollback: delete_node only deletes one node at a time and the bulk
 	// import has no natural key. Caller must clean up by node id if needed.
 	return MCPResult(Result);

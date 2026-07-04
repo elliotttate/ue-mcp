@@ -24,6 +24,7 @@
 // Unsupported constructs are reported in `warnings` rather than failing the run.
 
 #include "BlueprintHandlers.h"
+#include "BlueprintHandlers_Internal.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 #include "Engine/Blueprint.h"
@@ -682,6 +683,26 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AuthorLogic(const TSharedPtr<FJsonObj
 		TArray<TSharedPtr<FJsonValue>> W;
 		for (const FString& S : Warnings) W.Add(MakeShared<FJsonValueString>(S));
 		Result->SetArrayField(TEXT("warnings"), W);
+	}
+	// Inline wiring verification: resolve the created guids back to nodes and
+	// report their connections, so callers skip the read_graph round-trip.
+	{
+		TSet<FGuid> CreatedSet(Created);
+		TArray<UEdGraph*> AllGraphs;
+		BP->GetAllGraphs(AllGraphs);
+		TArray<UEdGraphNode*> CreatedNodes;
+		for (UEdGraph* Graph : AllGraphs)
+		{
+			if (!Graph) continue;
+			for (UEdGraphNode* Node : Graph->Nodes)
+			{
+				if (Node && CreatedSet.Contains(Node->NodeGuid)) CreatedNodes.Add(Node);
+			}
+		}
+		if (CreatedNodes.Num() > 0)
+		{
+			Result->SetObjectField(TEXT("report"), BuildCompactConnectionReport(CreatedNodes));
+		}
 	}
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 	Payload->SetStringField(TEXT("assetPath"), BP->GetPathName());
