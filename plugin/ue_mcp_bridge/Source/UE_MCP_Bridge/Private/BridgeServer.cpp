@@ -36,6 +36,7 @@
 #include "Handlers/StateTreeHandlers.h"
 #include "Handlers/ProjectIntelligenceHandlers.h"
 #include "Handlers/XRHandlers.h"
+#include "Handlers/SourceControlHandlers.h"
 
 // Platform-specific socket includes
 #if PLATFORM_WINDOWS
@@ -96,6 +97,8 @@ FMCPBridgeServer::FMCPBridgeServer(int32 Port)
 	FProjectIntelligenceHandlers::RegisterHandlers(HandlerRegistry);
 	// VR / XR support (VR Preview PIE, HMD status, poses, plugins).
 	FXRHandlers::RegisterHandlers(HandlerRegistry);
+	// Revision control (Perforce/Git/Plastic) file operations.
+	FSourceControlHandlers::RegisterHandlers(HandlerRegistry);
 }
 
 FMCPBridgeServer::~FMCPBridgeServer()

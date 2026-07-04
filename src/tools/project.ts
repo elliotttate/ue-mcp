@@ -672,6 +672,10 @@ export const projectTool: ToolDef = categoryTool(
         };
       },
     },
+    source_control_status: bp("Revision control status: active provider (Perforce/Git/Plastic), availability, and per-file state (checked out, added, modified, checked out by someone else) when paths are supplied. Paths accept /Game content paths or filesystem paths. Params: path? | paths? | assetPath?", "source_control_status", (p) => ({ path: p.path, paths: p.paths, assetPath: p.assetPath })),
+    source_control_checkout: bp("Check out file(s) from revision control before mutating them - Perforce rejects saves on files not checked out. Paths accept /Game content paths or filesystem paths. Params: path | paths | assetPath", "source_control_checkout", (p) => ({ path: p.path, paths: p.paths, assetPath: p.assetPath })),
+    source_control_add: bp("Mark newly created file(s) for add in revision control. Paths accept /Game content paths or filesystem paths. Params: path | paths | assetPath", "source_control_add", (p) => ({ path: p.path, paths: p.paths, assetPath: p.assetPath })),
+    source_control_revert: bp("Revert file(s) to their revision control state, discarding local changes. Destructive to local edits - confirm intent before use. Paths accept /Game content paths or filesystem paths. Params: path | paths | assetPath", "source_control_revert", (p) => ({ path: p.path, paths: p.paths, assetPath: p.assetPath })),
   },
   undefined,
   {
@@ -702,7 +706,9 @@ export const projectTool: ToolDef = categoryTool(
     classDomain: z.enum(["public", "private", "classes"]).optional().describe("For create_cpp_class: which folder under the module (Public/Private/Classes). Default 'public'."),
     subPath: z.string().optional().describe("For create_cpp_class: nested folder under the class domain (e.g. 'Gameplay/Abilities')."),
     wait: z.boolean().optional().describe("For live_coding_compile: block until compile finishes. Default false."),
-    path: z.string().optional().describe("For write_cpp_file: path to write (relative to Source/ or absolute within Source/)."),
+    path: z.string().optional().describe("For write_cpp_file: path to write (relative to Source/ or absolute within Source/). For source_control_*: /Game content path or filesystem path."),
+    paths: z.array(z.string()).optional().describe("source_control_*: multiple /Game content paths or filesystem paths"),
+    assetPath: z.string().optional().describe("source_control_*: /Game asset path alias for path"),
     content: z.string().optional().describe("For write_cpp_file: full file contents."),
     sourcePath: z.string().optional().describe("For read_cpp_source: path to .cpp (relative to Source/ or absolute)."),
     module: z.string().optional().describe("For write_source_file/read_source_file: module name (default project's primary module). Plugin modules are resolved too (#543)."),

@@ -77,6 +77,7 @@ public class UE_MCP_Bridge : ModuleRules
 				"Sequencer",
 				"Slate",
 				"SlateCore",
+				"SourceControl",
 				"StateTreeModule",
 				"StateTreeEditorModule",
 				"StaticMeshDescription",
