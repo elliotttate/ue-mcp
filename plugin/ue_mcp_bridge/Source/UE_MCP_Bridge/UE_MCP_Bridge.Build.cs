@@ -26,6 +26,8 @@ public class UE_MCP_Bridge : ModuleRules
 				"AnimationEditor",
 				"AssetRegistry",
 				"AssetTools",
+				"AutomationController",
+				"AutomationTest",
 				"AudioEditor",
 				"BSPUtils",
 				"BlueprintEditorLibrary",

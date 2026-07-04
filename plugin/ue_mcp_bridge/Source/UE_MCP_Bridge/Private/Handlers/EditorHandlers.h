@@ -190,6 +190,11 @@ private:
 	static TSharedPtr<FJsonValue> CheckPieCondition(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> PieLineTrace(const TSharedPtr<FJsonObject>& Params);
 
+	// UE Automation Framework runner (EditorHandlers_Automation.cpp). Async:
+	// start kicks a ticker-driven state machine, status polls it.
+	static TSharedPtr<FJsonValue> StartAutomationTests(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> GetAutomationTestStatus(const TSharedPtr<FJsonObject>& Params);
+
 	// Insights trace capture + analysis (EditorHandlers_Profiling.cpp).
 	static TSharedPtr<FJsonValue> StartTrace(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> StopTrace(const TSharedPtr<FJsonObject>& Params);

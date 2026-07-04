@@ -142,6 +142,21 @@ export const editorTool: ToolDef = categoryTool(
         return runPieTestSequence(ctx, p);
       },
     },
+    run_automation_tests: {
+      description: "Run UE Automation Framework tests (functional/smoke/project suites) matching a name filter and wait for structured results: per-test state, duration, errors/warnings with file:line events, plus a pass/fail summary. Params: filter (substring) OR filters[] OR runAll=true, timeoutSeconds? (default 600). Long suites: pass a larger timeoutSeconds and poll get_automation_status instead of waiting",
+      timeoutMs: 660_000,
+      handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
+        return runAutomationTests(ctx, p);
+      },
+    },
+    list_automation_tests: {
+      description: "Enumerate available UE Automation Framework test names, optionally filtered by substring. Params: filter?",
+      timeoutMs: 120_000,
+      handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
+        return runAutomationTests(ctx, { ...p, listOnly: true, timeoutSeconds: 90 });
+      },
+    },
+    get_automation_status: bp("Poll the in-flight automation run: phase (finding_workers|running|complete|failed), elapsed, counts, and results when finished", "get_automation_test_status"),
     hot_reload: bp("Hot reload C++", "hot_reload"),
     undo: bp("Undo last transaction", "undo"),
     redo: bp("Redo last transaction", "redo"),
@@ -258,6 +273,9 @@ export const editorTool: ToolDef = categoryTool(
     platform: z.string().optional(),
     maxLines: z.number().optional(),
     filter: z.string().optional(),
+    filters: z.array(z.string()).optional().describe("run_automation_tests: multiple name substrings (a test matching any runs)"),
+    runAll: z.boolean().optional().describe("run_automation_tests: run every discovered test instead of filtering (may take a long time)"),
+    timeoutSeconds: z.number().optional().describe("run_automation_tests: run deadline enforced editor-side (default 600)"),
     category: z.string().optional(),
     query: z.string().optional(),
     logName: z.string().optional(),
@@ -381,6 +399,37 @@ async function waitForPieCondition(ctx: ToolContext, p: Record<string, unknown>)
       };
     }
     await sleep(intervalMs);
+  }
+}
+
+async function runAutomationTests(ctx: ToolContext, p: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const timeoutSeconds = typeof p.timeoutSeconds === "number" ? p.timeoutSeconds : 600;
+  const start = (await ctx.bridge.call("start_automation_tests", {
+    filter: p.filter,
+    filters: p.filters,
+    listOnly: p.listOnly,
+    runAll: p.runAll,
+    timeoutSeconds,
+  })) as Record<string, unknown>;
+  if (start && start.success === false) return start;
+
+  // The bridge enforces its own timeout and salvages partial results; the
+  // extra 30s here covers worker discovery + result collection overhead.
+  const deadline = Date.now() + (timeoutSeconds + 30) * 1000;
+  for (;;) {
+    await sleep(1_500);
+    let status: Record<string, unknown> | null = null;
+    try {
+      status = (await ctx.bridge.call("get_automation_test_status", {})) as Record<string, unknown>;
+    } catch {
+      // Transient bridge hiccup mid-run; keep polling until the deadline.
+    }
+    if (status && (status.phase === "complete" || status.phase === "failed")) {
+      return status;
+    }
+    if (Date.now() > deadline) {
+      return { success: false, error: `Automation run did not finish within ${timeoutSeconds + 30}s`, lastStatus: status };
+    }
   }
 }
 

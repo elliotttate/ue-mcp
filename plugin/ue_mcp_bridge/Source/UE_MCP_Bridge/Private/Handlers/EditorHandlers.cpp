@@ -208,6 +208,9 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("simulate_pie_input"), &SimulatePieInput);
 	Registry.RegisterHandler(TEXT("check_pie_condition"), &CheckPieCondition);
 	Registry.RegisterHandler(TEXT("pie_line_trace"), &PieLineTrace);
+	// UE Automation Framework runner (EditorHandlers_Automation.cpp).
+	Registry.RegisterHandler(TEXT("start_automation_tests"), &StartAutomationTests);
+	Registry.RegisterHandler(TEXT("get_automation_test_status"), &GetAutomationTestStatus);
 	// Insights trace capture + analysis (EditorHandlers_Profiling.cpp).
 	Registry.RegisterHandler(TEXT("start_trace"), &StartTrace);
 	Registry.RegisterHandler(TEXT("stop_trace"), &StopTrace);
