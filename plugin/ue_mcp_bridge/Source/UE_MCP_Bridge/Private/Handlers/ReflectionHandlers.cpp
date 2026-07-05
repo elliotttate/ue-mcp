@@ -11,6 +11,9 @@
 #include "Engine/UserDefinedStruct.h"
 #include "Kismet2/EnumEditorUtils.h"
 #include "Kismet2/StructureEditorUtils.h"
+// FStructVariableDescription is only forward-declared by StructureEditorUtils.h
+// on newer engines; its definition lives in the struct editor data header.
+#include "UserDefinedStructure/UserDefinedStructEditorData.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "BlueprintHandlers.h"
