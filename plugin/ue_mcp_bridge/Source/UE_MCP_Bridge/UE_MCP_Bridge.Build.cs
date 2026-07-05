@@ -23,6 +23,7 @@ public class UE_MCP_Bridge : ModuleRules
 			{
 				"AIModule",
 				"AnimGraph",
+				"ApplicationCore",
 				"AnimationEditor",
 				"AssetRegistry",
 				"AssetTools",
