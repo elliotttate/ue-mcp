@@ -94,13 +94,15 @@ TSharedPtr<FJsonValue> FXRHandlers::GetXRStatus(const TSharedPtr<FJsonObject>& P
 		{
 			Result->SetBoolField(TEXT("hmdConnected"), HMD->IsHMDConnected());
 			Result->SetBoolField(TEXT("hmdEnabled"), HMD->IsHMDEnabled());
+			// Spectator screen control lives on the HMD device, not the tracking system.
+			Result->SetBoolField(TEXT("spectatorScreenAvailable"), HMD->GetSpectatorScreenController() != nullptr);
 		}
 		else
 		{
 			Result->SetBoolField(TEXT("hmdConnected"), false);
 			Result->SetBoolField(TEXT("hmdEnabled"), false);
+			Result->SetBoolField(TEXT("spectatorScreenAvailable"), false);
 		}
-		Result->SetBoolField(TEXT("spectatorScreenAvailable"), XR->GetSpectatorScreenController() != nullptr);
 
 		TArray<int32> DeviceIds;
 		XR->EnumerateTrackedDevices(DeviceIds);
@@ -296,7 +298,8 @@ TSharedPtr<FJsonValue> FXRHandlers::SetSpectatorScreenMode(const TSharedPtr<FJso
 	{
 		return MCPError(TEXT("No XR system active"));
 	}
-	ISpectatorScreenController* Spectator = XR->GetSpectatorScreenController();
+	IHeadMountedDisplay* HMD = XR->GetHMDDevice();
+	ISpectatorScreenController* Spectator = HMD ? HMD->GetSpectatorScreenController() : nullptr;
 	if (!Spectator)
 	{
 		return MCPError(TEXT("XR system has no spectator screen controller"));
@@ -349,7 +352,7 @@ TSharedPtr<FJsonValue> FXRHandlers::ListUnrealPlugins(const TSharedPtr<FJsonObje
 		P->SetStringField(TEXT("friendlyName"), Descriptor.FriendlyName);
 		P->SetStringField(TEXT("category"), Descriptor.Category);
 		P->SetBoolField(TEXT("enabled"), Plugin->IsEnabled());
-		P->SetBoolField(TEXT("enabledByDefault"), Descriptor.bEnabledByDefault);
+		P->SetBoolField(TEXT("enabledByDefault"), Descriptor.EnabledByDefault == EPluginEnabledByDefault::Enabled);
 		P->SetStringField(TEXT("location"),
 			Plugin->GetType() == EPluginType::Engine ? TEXT("engine") :
 			Plugin->GetType() == EPluginType::Project ? TEXT("project") : TEXT("other"));
