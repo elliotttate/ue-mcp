@@ -267,6 +267,10 @@ namespace
 
 		Manager->Tick();
 
+		// Tick() can pump the refresh delegate, which may finish the run
+		// (listOnly, no matches) and remove this ticker; stop immediately.
+		if (!Run.bActive) return false;
+
 		const double Elapsed = FPlatformTime::Seconds() - Run.StartTimeSeconds;
 		if (Elapsed > Run.TimeoutSeconds)
 		{
