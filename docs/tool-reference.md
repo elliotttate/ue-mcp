@@ -149,6 +149,7 @@ UE-MCP exposes **<!-- count:tools -->28<!-- /count --> category tools** covering
 | `list_variables` | List variables. Params: `assetPath` |
 | `list_functions` | List functions/graphs. Params: `assetPath` |
 | `read_graph` | Read graph nodes. Supports pagination, file dumps, and title/class node filters. Params: `assetPath, graphName, offset?, limit?, includePins?, includeDefaults?, includeComments?, dumpToFile?, outputPath?, titleFilter?, classFilter? (#560)` |
+| `export_compact_graph` | Export a headless, token-efficient, loss-aware Blueprint graph model for Blueprint-to-C++ analysis. Recursively follows user graphs while preserving persistent identity, pin safety metadata, normalized flow, function signatures, locals, and optional derived overrides. Unknown node classes are reported explicitly; use `export_nodes_t3d` for exact round-trip mutation. Params: `assetPath, graphName?, maxDepth?, includeHiddenPins?, includeDerivedOverrides?, derivedOverrideLoadLimit?, dumpToFile?, outputPath?, inlineResult?` |
 | `read_graph_summary` | Lightweight graph summary (nodes+edges only, ~10KB). Filterable node list. Params: `assetPath, graphName?, titleFilter?, classFilter? (#560)` |
 | `get_execution_flow` | Trace exec pins from an entry point. Params: `assetPath, graphName?, entryPoint?` |
 | `get_dependencies` | Forward (classes/functions/assets) or reverse (referencers) deps. Params: `assetPath, reverse?` |

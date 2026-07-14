@@ -84,6 +84,7 @@ void FBlueprintHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("list_blueprint_functions"), &ListBlueprintFunctions);
 	Registry.RegisterHandler(TEXT("add_node"), &AddNode);
 	Registry.RegisterHandlerWithTimeout(TEXT("read_blueprint_graph"), &ReadBlueprintGraph, ReadBlueprintGraphTimeoutSeconds);
+	Registry.RegisterHandlerWithTimeout(TEXT("export_compact_graph"), &ExportCompactGraph, ReadBlueprintGraphTimeoutSeconds);
 	Registry.RegisterHandler(TEXT("add_event_dispatcher"), &AddEventDispatcher);
 	Registry.RegisterHandler(TEXT("rename_function"), &RenameFunction);
 	Registry.RegisterHandler(TEXT("delete_function"), &DeleteFunction);

@@ -26,6 +26,10 @@ private:
 	static TSharedPtr<FJsonValue> ListBlueprintFunctions(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AddNode(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadBlueprintGraph(const TSharedPtr<FJsonObject>& Params);
+	// Headless, token-efficient graph export for Blueprint-to-C++ analysis.
+	// Preserves persistent editor identity and safety metadata while providing
+	// normalized nodes/edges and recursively referenced user graphs.
+	static TSharedPtr<FJsonValue> ExportCompactGraph(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AddEventDispatcher(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> RenameFunction(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> DeleteFunction(const TSharedPtr<FJsonObject>& Params);

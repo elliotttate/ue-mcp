@@ -81,6 +81,37 @@ describe("blueprint — full lifecycle", () => {
     expect(r.ok, r.error).toBe(true);
   });
 
+  it("export_compact_graph preserves compact fidelity and safety metadata", async () => {
+    const r = await callBridge(bridge, "export_compact_graph", {
+      path: bpPath,
+      graphName: "EventGraph",
+      maxDepth: 1,
+      includeHiddenPins: true,
+      includeDerivedOverrides: true,
+    });
+    expect(r.ok, r.error).toBe(true);
+    const result = r.result as {
+      schema: string;
+      fidelity: string;
+      graphs: Array<{ id: string; nodes: Array<{ id: string; pins: Array<{ id: string; rawName: string; orphaned: boolean; ownerValid: boolean }> }> }>;
+      unsupportedNodes: unknown[];
+      stats: { graphCount: number; orphanedPinCount: number; ownerlessOrMismatchedPinCount: number; danglingLinkCount: number };
+    };
+    expect(result.schema).toBe("ue-mcp.compact-blueprint-graph");
+    expect(result.fidelity).toContain("export_nodes_t3d");
+    expect(result.graphs.length).toBeGreaterThan(0);
+    expect(result.graphs[0].id.length).toBeGreaterThan(0);
+    expect(Array.isArray(result.unsupportedNodes)).toBe(true);
+    expect(result.stats.graphCount).toBe(result.graphs.length);
+    expect(result.stats.orphanedPinCount).toBeGreaterThanOrEqual(0);
+    expect(result.stats.ownerlessOrMismatchedPinCount).toBeGreaterThanOrEqual(0);
+    expect(result.stats.danglingLinkCount).toBeGreaterThanOrEqual(0);
+    const pins = result.graphs.flatMap((graph) => graph.nodes.flatMap((node) => node.pins));
+    expect(pins.length).toBeGreaterThan(0);
+    expect(pins.every((pin) => typeof pin.rawName === "string")).toBe(true);
+    expect(pins.every((pin) => typeof pin.orphaned === "boolean" && typeof pin.ownerValid === "boolean")).toBe(true);
+  });
+
   it("add_component (SceneComponent)", async () => {
     const r = await callBridge(bridge, "add_component", {
       path: bpPath, componentClass: "SceneComponent", componentName: "MyScene",
