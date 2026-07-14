@@ -19,6 +19,8 @@ private:
 	// #240/#241/#302/#320/#370/#353: deep component-tree introspection - per-component
 	// attach topology + transforms + collision + mesh/material refs + reflected properties.
 	static TSharedPtr<FJsonValue> GetComponentTree(const TSharedPtr<FJsonObject>& Params);
+	// Bounded aggregate/sample inspection for actors with thousands of components.
+	static TSharedPtr<FJsonValue> SummarizeComponents(const TSharedPtr<FJsonObject>& Params);
 	// #386/#387: relative transform between two actors (target's transform
 	// expressed in reference's local space).
 	static TSharedPtr<FJsonValue> GetRelativeTransform(const TSharedPtr<FJsonObject>& Params);

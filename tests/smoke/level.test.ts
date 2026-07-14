@@ -69,6 +69,21 @@ describe("level — actor details (dynamic)", () => {
     const r = await callBridge(bridge, "get_actor_details", { actorLabel: firstActor });
     expect(r.ok, r.error).toBe(true);
   });
+
+  it("summarize_components returns a bounded sample", async ({ skip }) => {
+    if (!firstActor) skip();
+    const r = await callBridge(bridge, "summarize_components", {
+      actorLabel: firstActor,
+      world: "editor",
+      sampleLimit: 3,
+    });
+    expect(r.ok, r.error).toBe(true);
+    const result = r.result as Record<string, unknown>;
+    const sample = result.nearestComponents as unknown[] | undefined;
+    expect(sample).toBeDefined();
+    expect(sample!.length).toBeLessThanOrEqual(3);
+    expect(result.counts).toBeDefined();
+  });
 });
 
 describe("level — write (with cleanup)", () => {

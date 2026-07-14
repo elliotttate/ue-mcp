@@ -83,6 +83,7 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("delete_actor"), &DeleteActor);
 	Registry.RegisterHandler(TEXT("get_actor_details"), &GetActorDetails);
 	Registry.RegisterHandler(TEXT("get_component_tree"), &GetComponentTree);
+	Registry.RegisterHandler(TEXT("summarize_components"), &SummarizeComponents);
 	Registry.RegisterHandler(TEXT("get_relative_transform"), &GetRelativeTransform);
 	Registry.RegisterHandler(TEXT("get_current_level"), &GetCurrentLevel);
 	Registry.RegisterHandler(TEXT("list_levels"), &ListLevels);
@@ -146,6 +147,8 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 TSharedPtr<FJsonValue> FLevelHandlers::GetOutliner(const TSharedPtr<FJsonObject>& Params)
 {
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
+	const bool bIncludeTransform = OptionalBool(Params, TEXT("includeTransform"), false);
+	const bool bIncludeBounds = OptionalBool(Params, TEXT("includeBounds"), false);
 	UWorld* World = ResolveWorldScope(WorldScope);
 	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
 
@@ -1701,6 +1704,8 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorsByClass(const TSharedPtr<FJsonOb
 	if (auto Err = RequireString(Params, TEXT("className"), ClassName)) return Err;
 
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
+	const bool bIncludeTransform = OptionalBool(Params, TEXT("includeTransform"), false);
+	const bool bIncludeBounds = OptionalBool(Params, TEXT("includeBounds"), false);
 	UWorld* World = ResolveWorldScope(WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
@@ -1716,6 +1721,22 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorsByClass(const TSharedPtr<FJsonOb
 			E->SetStringField(TEXT("label"), A->GetActorLabel());
 			E->SetStringField(TEXT("class"), CName);
 			E->SetStringField(TEXT("path"), A->GetPathName());
+			if (bIncludeTransform)
+			{
+				E->SetObjectField(TEXT("location"), MCPVec3ToJsonObject(A->GetActorLocation()));
+				E->SetObjectField(TEXT("rotation"), MCPRotatorToJsonObject(A->GetActorRotation()));
+				E->SetObjectField(TEXT("scale"), MCPVec3ToJsonObject(A->GetActorScale3D()));
+			}
+			if (bIncludeBounds)
+			{
+				FVector Origin = FVector::ZeroVector;
+				FVector Extent = FVector::ZeroVector;
+				A->GetActorBounds(false, Origin, Extent, true);
+				TSharedPtr<FJsonObject> Bounds = MakeShared<FJsonObject>();
+				Bounds->SetObjectField(TEXT("origin"), MCPVec3ToJsonObject(Origin));
+				Bounds->SetObjectField(TEXT("extent"), MCPVec3ToJsonObject(Extent));
+				E->SetObjectField(TEXT("bounds"), Bounds);
+			}
 			Out.Add(MakeShared<FJsonValueObject>(E));
 		}
 	}
