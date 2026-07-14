@@ -16,6 +16,10 @@ export interface PluginInfo {
 }
 
 export interface UeMcpConfig {
+  /** Project-specific Unreal Engine root. Overrides EngineAssociation discovery. */
+  enginePath?: string;
+  /** Extra command-line arguments used by editor start/restart for this project. */
+  editorArgs?: string[];
   /** Content roots to search by default (e.g. ["/Game/", "/GASP/", "/MyPlugin/"]) */
   contentRoots?: string[];
   /** Tool categories to disable (e.g. ["gas", "networking", "pcg"]) */

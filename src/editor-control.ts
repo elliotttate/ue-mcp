@@ -12,9 +12,14 @@ const IS_WINDOWS = process.platform === "win32";
 const WINDOWS_ONLY_MSG =
   "editor start/stop/restart is Windows-only. On macOS/Linux, start and stop the Unreal Editor manually; ue-mcp will reconnect when the bridge is reachable.";
 
-function findUEBuildTool(): string | null {
+function findUEBuildTool(enginePath?: string): string | null {
   const envPath = process.env.UE_BUILD_TOOL_PATH;
   if (envPath) return envPath;
+
+  if (enginePath) {
+    const configured = path.join(enginePath, "Engine", "Build", "BatchFiles", IS_WINDOWS ? "Build.bat" : "Build.sh");
+    if (fs.existsSync(configured)) return configured;
+  }
 
   const versions = ["5.8", "5.7", "5.6", "5.5", "5.4", "5.3"];
   const scriptName = IS_WINDOWS ? "Build.bat" : "Build.sh";
@@ -58,6 +63,12 @@ function findEditorExecutable(project?: ProjectContext): string | null {
   const envPath = process.env.UE_EDITOR_PATH;
   if (envPath) return envPath;
 
+  const configuredEngine = project?.config.enginePath;
+  if (configuredEngine) {
+    const configuredEditor = path.join(configuredEngine, "Engine", "Binaries", "Win64", "UnrealEditor.exe");
+    if (fs.existsSync(configuredEditor)) return configuredEditor;
+  }
+
   const associatedEngineRoot = findEngineInstall(project?.engineAssociation ?? null);
   if (associatedEngineRoot) {
     const associatedEditorExe = path.join(associatedEngineRoot, "Engine", "Binaries", "Win64", "UnrealEditor.exe");
@@ -66,7 +77,7 @@ function findEditorExecutable(project?: ProjectContext): string | null {
     }
   }
 
-  const buildTool = findUEBuildTool();
+  const buildTool = findUEBuildTool(configuredEngine);
   if (!buildTool) return null;
 
   const engineRoot = path.resolve(buildTool, "..", "..", "..", "..");
@@ -161,7 +172,7 @@ export async function startEditor(project: ProjectContext): Promise<{ success: b
   }
 
   try {
-    const editorProcess = spawn(editorExe, [project.projectPath], {
+    const editorProcess = spawn(editorExe, [project.projectPath, ...(project.config.editorArgs ?? [])], {
       stdio: "ignore",
       detached: true,
     });
@@ -272,9 +283,9 @@ function getPlatformString(): string {
 
 export async function buildProject(
   projectPath: string,
-  opts: { onOutput?: (line: string) => void } = {},
+  opts: { onOutput?: (line: string) => void; enginePath?: string } = {},
 ): Promise<BuildResult> {
-  const buildTool = findUEBuildTool();
+  const buildTool = findUEBuildTool(opts.enginePath);
   if (!buildTool) {
     return {
       success: false,

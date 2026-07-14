@@ -38,6 +38,7 @@ export const editorTool: ToolDef = categoryTool(
         ctx.project.ensureLoaded();
         const lines: string[] = [];
         const result = await buildProject(ctx.project.projectPath!, {
+          enginePath: ctx.project.config.enginePath,
           onOutput: (text) => lines.push(text),
         });
         return { ...result, output: lines.join("") };

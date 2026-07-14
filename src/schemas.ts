@@ -52,6 +52,8 @@ export const IntelligenceConfigSchema = z
 
 export const UeMcpConfigSchema = z
   .object({
+    enginePath: z.string().optional(),
+    editorArgs: z.array(z.string()).optional(),
     contentRoots: z.array(z.string()).optional(),
     disable: z.array(z.string()).optional(),
     http: z
