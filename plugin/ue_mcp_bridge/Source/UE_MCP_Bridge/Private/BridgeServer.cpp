@@ -821,9 +821,10 @@ TArray<uint8> FMCPBridgeServer::CreateWebSocketFrame(const FString& Message)
 	else
 	{
 		Frame.Add(127);
+		const uint64 PayloadLength = static_cast<uint64>(MessageLen);
 		for (int32 i = 7; i >= 0; --i)
 		{
-			Frame.Add((MessageLen >> (i * 8)) & 0xFF);
+			Frame.Add(static_cast<uint8>((PayloadLength >> (i * 8)) & 0xFF));
 		}
 	}
 
