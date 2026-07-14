@@ -3,7 +3,7 @@ import { categoryTool, bp, type ToolDef } from "../types.js";
 
 export const blueprintTool: ToolDef = categoryTool(
   "blueprint",
-  "Blueprint reading, authoring, and compilation. Covers variables, functions, graphs, nodes, components, interfaces, and event dispatchers.",
+  "Blueprint reading, authoring, and compilation, including AnimGraph/EventGraph node scripting: add_node, connect_pins, search_node_types, plus variables, functions, graphs, components, interfaces, and event dispatchers.",
   {
     read:              bp("Read BP structure incl. SCS components AND inherited native components from the CDO (CharacterMesh0, CharMoveComp, etc.). Params: assetPath, includeComponentProperties? (dump UPROPERTY name/type/value per component template; off by default) (#353/#370)", "read_blueprint", (p) => ({ path: p.assetPath, includeComponentProperties: p.includeComponentProperties })),
     list_variables:    bp("List variables. Params: assetPath", "list_blueprint_variables", (p) => ({ path: p.assetPath })),
@@ -24,7 +24,7 @@ export const blueprintTool: ToolDef = categoryTool(
     create_function:   bp("Create function. Params: assetPath, functionName", "create_function", (p) => ({ path: p.assetPath, functionName: p.functionName })),
     delete_function:   bp("Delete function. Params: assetPath, functionName", "delete_function", (p) => ({ path: p.assetPath, functionName: p.functionName })),
     rename_function:   bp("Rename function. Params: assetPath, oldName, newName", "rename_function", (p) => ({ path: p.assetPath, oldName: p.oldName, newName: p.newName })),
-    add_node:          bp("Add graph node. For a CallFunction node bound to a custom C++ UFUNCTION, pass nodeParams {functionName, className (or targetClass) = /Script/Module.Class}; the function also resolves against the BP's own component classes and an unambiguous loaded BlueprintCallable function, producing a bound node with pins instead of a stub (#546). Params: assetPath, graphName?, nodeClass, nodeParams?", "add_node", (p) => ({ path: p.assetPath, graphName: p.graphName ?? "EventGraph", nodeClass: p.nodeClass, nodeParams: p.nodeParams })),
+    add_node:          bp("Add graph node. For a CallFunction node bound to a custom C++ UFUNCTION, pass nodeParams {functionName, className (or targetClass) = /Script/Module.Class}; the function also resolves against the BP's own component classes and an unambiguous loaded BlueprintCallable function, producing a bound node with pins instead of a stub (#546). nodeClass='CallParent' places a 'Parent: <Function>' call bound to the parent implementation (functionName resolves against ParentClass) so an override graph can chain to the base (#688). Params: assetPath, graphName?, nodeClass, nodeParams?", "add_node", (p) => ({ path: p.assetPath, graphName: p.graphName ?? "EventGraph", nodeClass: p.nodeClass, nodeParams: p.nodeParams })),
     delete_node:       bp("Delete node. Params: assetPath, graphName, nodeName", "delete_node", (p) => ({ path: p.assetPath, graphName: p.graphName, nodeName: p.nodeName })),
     set_node_property: bp("Set node pin default or struct property. Params: assetPath, graphName, nodeName, propertyName, value", "set_node_property", (p) => ({ path: p.assetPath, graphName: p.graphName, nodeName: p.nodeName, propertyName: p.propertyName, value: p.value })),
     connect_pins:      bp("Wire nodes. Params: sourceNode, sourcePin, targetNode, targetPin, assetPath, graphName?", "connect_pins"),
@@ -44,6 +44,8 @@ export const blueprintTool: ToolDef = categoryTool(
     search_node_types: bp("Search nodes. Params: query", "search_node_types"),
     create_interface:  bp("Create BP Interface. Params: assetPath", "create_blueprint_interface", (p) => ({ path: p.assetPath })),
     add_interface:     bp("Implement interface. Params: blueprintPath, interfacePath", "add_blueprint_interface"),
+    override_function: bp("Override an inherited interface implementation (inherited via the parent class) or an overridable parent virtual function, with the matching signature so it actually binds as the override (create_function makes a blank, non-binding graph). Returns kind ('function' with a graphName, or 'event' with a nodeId in EventGraph). Event-shaped functions become override events unless preferFunction=true. Pass interfacePath to also implement the interface first if it is not present. Then wire the body with add_node (use nodeClass='CallParent' to chain to the base implementation). Params: assetPath, functionName, source? ('auto'|'interface'|'parent', advisory), preferFunction?, interfacePath? (#688)", "override_function", (p) => ({ path: p.assetPath, functionName: p.functionName, source: p.source, preferFunction: p.preferFunction, interfacePath: p.interfacePath })),
+    list_overridable_functions: bp("List functions this Blueprint can override: inherited interface implementations and overridable parent virtuals. Each entry has name, source ('interface'|'parent'), declaringClass, canBeEvent. Params: assetPath (#688)", "list_overridable_functions", (p) => ({ path: p.assetPath })),
     list_graphs:       bp("List all graphs in a blueprint. Params: assetPath", "list_blueprint_graphs", (p) => ({ path: p.assetPath })),
     add_event_dispatcher: bp("Add event dispatcher (multicast delegate variable + signature graph + UFunction). Without parameters, broadcasters fire void(). With parameters, the signature graph gets typed user pins so K2Node_CallDelegate compiles cleanly (#276). Params: blueprintPath, name, parameters?: [{name, type}] where type is bool/int/float/string/name/text/vector/rotator/transform/object:/Script/Module.Class/struct:/Script/Module.Struct", "add_event_dispatcher"),
     duplicate:         bp("Duplicate blueprint asset. Params: sourcePath, destinationPath", "duplicate_blueprint"),
@@ -62,6 +64,40 @@ export const blueprintTool: ToolDef = categoryTool(
     get_cdo_properties: bp("Read UPROPERTY values from any C++ class CDO. Params: className, propertyNames? (#183)", "get_cdo_properties"),
     run_construction_script: bp("Spawn temp actor, run construction script, return generated components and transforms. Params: assetPath, location? (#195)", "run_construction_script", (p) => ({ path: p.assetPath, location: p.location })),
     compile_all: bp("Batch compile + save Blueprints. Params: assetPaths[], save? (default true). Returns per-path status (compiled/failed/not_found) (#284)", "compile_blueprints", (p) => ({ assetPaths: p.assetPaths, save: p.save })),
+    author: {
+      description: "Author a whole Blueprint in one call: optionally create it (parentClass), then add components, variables and function stubs, then compile - one agent-facing action instead of a dozen add_* round-trips. Params: assetPath, parentClass? (create/ensure the BP if given), components? [{componentClass, componentName?, parentComponent?, childActorClass?}], variables? [{name, varType}], functions? [{functionName}], compile? (default true). Returns per-step results + created flag. (#607)",
+      handler: async (ctx, p) => {
+        const assetPath = p.assetPath as string;
+        if (!assetPath) throw new Error("Missing 'assetPath'");
+        const steps: Array<{ step: string; target: string; ok: boolean; result?: unknown; error?: string }> = [];
+        const run = async (step: string, target: string, method: string, params: Record<string, unknown>) => {
+          try { const result = await ctx.bridge.call(method, params); steps.push({ step, target, ok: true, result }); }
+          catch (e) { steps.push({ step, target, ok: false, error: e instanceof Error ? e.message : String(e) }); }
+        };
+        let created = false;
+        if (p.parentClass) {
+          try {
+            const r = await ctx.bridge.call("create_blueprint", { path: assetPath, parentClass: p.parentClass }) as Record<string, unknown>;
+            created = r?.created !== false;
+            steps.push({ step: "create", target: assetPath, ok: true, result: r });
+          } catch (e) { steps.push({ step: "create", target: assetPath, ok: false, error: e instanceof Error ? e.message : String(e) }); }
+        }
+        for (const c of (p.components as Array<Record<string, unknown>> ?? [])) {
+          await run("add_component", String(c.componentClass ?? ""), "add_component", { path: assetPath, componentClass: c.componentClass, componentName: c.componentName ?? c.componentClass, parentComponent: c.parentComponent, childActorClass: c.childActorClass });
+        }
+        for (const v of (p.variables as Array<Record<string, unknown>> ?? [])) {
+          await run("add_variable", String(v.name ?? ""), "add_variable", { path: assetPath, name: v.name, type: v.varType ?? v.type });
+        }
+        for (const f of (p.functions as Array<Record<string, unknown>> ?? [])) {
+          await run("create_function", String(f.functionName ?? ""), "create_function", { path: assetPath, functionName: f.functionName });
+        }
+        if ((p.compile ?? true) !== false) {
+          await run("compile", assetPath, "compile_blueprint", { path: assetPath });
+        }
+        const failed = steps.filter(s => !s.ok);
+        return { assetPath, created, stepCount: steps.length, failedCount: failed.length, ok: failed.length === 0, steps };
+      },
+    },
     cleanup_graph: bp("Remove orphan/corrupted nodes (no class, blank title+no pins, missing target UFunction). Params: assetPath, graphName? (default: every graph) (#285)", "cleanup_graph", (p) => ({ assetPath: p.assetPath, graphName: p.graphName })),
     connect_pins_batch: bp("Apply many pin connections in one call (single compile + save). Params: assetPath, graphName?, connections[]: [{sourceNode, sourcePin, targetNode, targetPin}] (#267)", "connect_pins_batch", (p) => ({ assetPath: p.assetPath, graphName: p.graphName, connections: p.connections })),
     set_node_position: bp("Move a graph node to (posX, posY). Params: assetPath, graphName?, nodeId, posX, posY (#277)", "set_node_position", (p) => ({ assetPath: p.assetPath, graphName: p.graphName, nodeId: p.nodeId, posX: p.posX, posY: p.posY })),
@@ -73,6 +109,10 @@ export const blueprintTool: ToolDef = categoryTool(
     graphName: z.string().optional(), functionName: z.string().optional(),
     name: z.string().optional(), varType: z.string().optional().describe("Variable type"),
     parentClass: z.string().optional(),
+    components: z.array(z.record(z.unknown())).optional().describe("author: [{componentClass, componentName?, parentComponent?, childActorClass?}] (#607)"),
+    variables: z.array(z.record(z.unknown())).optional().describe("author: [{name, varType}] (#607)"),
+    functions: z.array(z.record(z.unknown())).optional().describe("author: [{functionName}] (#607)"),
+    compile: z.boolean().optional().describe("author: compile after authoring (default true) (#607)"),
     instanceEditable: z.boolean().optional(), blueprintReadOnly: z.boolean().optional(),
     category: z.string().optional(), tooltip: z.string().optional(),
     replicationType: z.string().optional(),
@@ -99,6 +139,8 @@ export const blueprintTool: ToolDef = categoryTool(
     TickInterval: z.number().optional(),
     parameterName: z.string().optional(), parameterType: z.string().optional(),
     isOutput: z.boolean().optional(),
+    source: z.enum(["auto", "interface", "parent"]).optional().describe("override_function: advisory hint for where the overridable function comes from (#688)"),
+    preferFunction: z.boolean().optional().describe("override_function: force the function-graph form even when the function could be placed as an override event (#688)"),
     query: z.string().optional(),
     includeFunctions: z.boolean().optional(),
     blueprintPath: z.string().optional(), interfacePath: z.string().optional(),

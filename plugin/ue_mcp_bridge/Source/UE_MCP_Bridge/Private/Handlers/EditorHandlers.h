@@ -161,6 +161,8 @@ private:
 	static TSharedPtr<FJsonValue> ListCrashes(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetCrashInfo(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CheckForCrashes(const TSharedPtr<FJsonObject>& Params);
+	// #693: headlessly run registered Automation tests and report pass/fail.
+	static TSharedPtr<FJsonValue> RunAutomationTests(const TSharedPtr<FJsonObject>& Params);
 	// #14: Build project
 	static TSharedPtr<FJsonValue> BuildProject(const TSharedPtr<FJsonObject>& Params);
 	// #49: Generate project files
@@ -178,6 +180,11 @@ private:
 	// #384: configure ULevelEditorPlaySettings (multi-client PIE, net mode, etc.)
 	static TSharedPtr<FJsonValue> ConfigurePie(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetPieConfig(const TSharedPtr<FJsonObject>& Params);
+	// #671: PIE player view + input staging.
+	static TSharedPtr<FJsonValue> PieSetPlayerView(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> StageGameInput(const TSharedPtr<FJsonObject>& Params);
+	// #583: repeatedly invoke a parameterless UFUNCTION on an actor at an interval.
+	static TSharedPtr<FJsonValue> InvokeFunctionRepeating(const TSharedPtr<FJsonObject>& Params);
 	// #455: discover BlueprintFunctionLibrary classes (GeometryScript,
 	// Kismet*, AnimationLibrary, user-defined) so invoke_function callers
 	// can find the libraries that expose the ops they want.

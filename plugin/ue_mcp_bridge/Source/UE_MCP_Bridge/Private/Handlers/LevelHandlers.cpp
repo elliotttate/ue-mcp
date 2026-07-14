@@ -13,7 +13,17 @@
 #include "Components/AudioComponent.h"
 #include "Sound/SoundBase.h"
 #include "Components/InstancedStaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/SkeletalMesh.h"
+#include "Animation/SkeletalMeshActor.h"
+#include "Animation/AnimSequence.h"
+#include "Components/StaticMeshComponent.h"
+#include "Exporters/Exporter.h"
+#include "Exporters/FbxExportOption.h"
+#include "AssetExportTask.h"
+#include "Misc/FileHelper.h"
+#include "Serialization/JsonWriter.h"
+#include "Serialization/JsonSerializer.h"
 #include "ReferenceSkeleton.h"
 #include "CollisionQueryParams.h"
 #include "Engine/HitResult.h"
@@ -123,6 +133,20 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("add_hismc_instances"), &AddHismcInstances);
 	Registry.RegisterHandler(TEXT("add_ismc_instances"), &AddHismcInstances);
 	Registry.RegisterHandler(TEXT("add_instances"), &AddHismcInstances);
+	// #697: read/update/remove existing instances on an ISMC/HISMC.
+	Registry.RegisterHandler(TEXT("get_instance_transforms"), &GetInstanceTransforms);
+	Registry.RegisterHandler(TEXT("update_instance_transform"), &UpdateInstanceTransform);
+	Registry.RegisterHandler(TEXT("remove_instance"), &RemoveInstance);
+	// #696: enable + force-build Nanite on a static mesh.
+	Registry.RegisterHandler(TEXT("set_nanite_settings"), &SetNaniteSettings);
+	Registry.RegisterHandler(TEXT("get_nanite_info"), &GetNaniteInfo);
+	// #679/#677: spawn a SkeletalMeshActor for visual/deform verification.
+	Registry.RegisterHandler(TEXT("spawn_skeletal_mesh_actor"), &SpawnSkeletalMeshActor);
+	Registry.RegisterHandler(TEXT("place_skeletal_actor"), &SpawnSkeletalMeshActor);
+	// #666: add a material blendable to a PostProcessVolume.
+	Registry.RegisterHandler(TEXT("add_post_process_blendable"), &AddPostProcessBlendable);
+	// #637: export a selected actor's mesh to FBX + metadata sidecar.
+	Registry.RegisterHandler(TEXT("export_actor_fbx"), &ExportActorFbx);
 	Registry.RegisterHandler(TEXT("snap_actor_to_floor"), &SnapActorToFloor);
 	Registry.RegisterHandler(TEXT("delete_actors"), &DeleteActors);
 	Registry.RegisterHandler(TEXT("add_actor_tag"), &AddActorTag);
@@ -1166,6 +1190,25 @@ TSharedPtr<FJsonValue> FLevelHandlers::LoadLevel(const TSharedPtr<FJsonObject>& 
 	FString LevelPath;
 	if (auto Err = RequireString(Params, TEXT("levelPath"), LevelPath)) return Err;
 
+	if (!GEditor) return MCPError(TEXT("GEditor not available"));
+
+	// #590/#589: loading a map right after a PIE session (or a level-script
+	// recompile / duplicate) fatally asserts "World Memory Leaks: N leaks
+	// objects and packages" - the previous world's objects are still
+	// referenced when the engine tears it down. End any in-flight play session
+	// and force a full GC first so those references are released before the map
+	// swap. Mirrors what the editor does between map loads.
+	bool bEndedPIE = false;
+	if (GEditor->PlayWorld != nullptr || GEditor->bIsSimulatingInEditor)
+	{
+		GEditor->EndPlayMap();
+		bEndedPIE = true;
+	}
+	// Trim transient/PIE packages then collect twice - the first pass unroots
+	// the world, the second reaps objects the first pass' cluster dissolve freed.
+	CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS, /*bPerformFullPurge*/ true);
+	CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS, /*bPerformFullPurge*/ true);
+
 	// Use the LevelEditorSubsystem to load the level
 	ULevelEditorSubsystem* LevelEditorSubsystem = GEditor->GetEditorSubsystem<ULevelEditorSubsystem>();
 	if (!LevelEditorSubsystem)
@@ -1189,6 +1232,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::LoadLevel(const TSharedPtr<FJsonObject>& 
 	}
 
 	Result->SetStringField(TEXT("levelPath"), LevelPath);
+	Result->SetBoolField(TEXT("endedPlaySession"), bEndedPIE);
 
 	return MCPResult(Result);
 }
@@ -1441,16 +1485,25 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentDetails(const TSharedPtr<FJso
 	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
 
 	const FString ComponentName = OptionalString(Params, TEXT("componentName"));
+	// #584: optionally dump arbitrary UPROPERTY values (custom fields,
+	// CharacterMovement MaxWalkSpeed, etc.). world lets this read a PIE
+	// actor's live component instance too.
+	const bool bIncludeValues = OptionalBool(Params, TEXT("includeValues"), false);
+	const TArray<TSharedPtr<FJsonValue>>* PropNamesArr = nullptr;
+	Params->TryGetArrayField(TEXT("propertyNames"), PropNamesArr);
+	TArray<FString> PropFilter = JsonArrayToStringList(PropNamesArr);
 
-	REQUIRE_EDITOR_WORLD(World);
+	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
+	UWorld* World = ResolveWorldScope(WorldScope);
+	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
 
-	AActor* TargetActor = FindActorByLabel(World, ActorLabel);
+	AActor* TargetActor = FindActorByLabelNameOrPath(World, ActorLabel);
 	if (!TargetActor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
 	}
 
-	auto DescribeComponent = [](UActorComponent* Comp) -> TSharedPtr<FJsonObject>
+	auto DescribeComponent = [bIncludeValues, &PropFilter](UActorComponent* Comp) -> TSharedPtr<FJsonObject>
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		Obj->SetStringField(TEXT("name"), Comp->GetName());
@@ -1481,6 +1534,22 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentDetails(const TSharedPtr<FJso
 			Obj->SetObjectField(TEXT("worldRotation"), RotObj(World.Rotator()));
 			USceneComponent* Parent = Scene->GetAttachParent();
 			Obj->SetStringField(TEXT("attachParent"), Parent ? Parent->GetName() : TEXT(""));
+		}
+		// #584: dump arbitrary UPROPERTY values so callers can read custom
+		// fields / movement speeds without execute_python.
+		if (bIncludeValues)
+		{
+			TSharedPtr<FJsonObject> Values = MakeShared<FJsonObject>();
+			for (TFieldIterator<FProperty> It(Comp->GetClass()); It; ++It)
+			{
+				FProperty* Prop = *It;
+				const FString PName = Prop->GetName();
+				if (PropFilter.Num() > 0 && !PropFilter.Contains(PName)) continue;
+				FString Exported;
+				Prop->ExportText_Direct(Exported, Prop->ContainerPtrToValuePtr<void>(Comp), Prop->ContainerPtrToValuePtr<void>(Comp), Comp, PPF_None);
+				Values->SetStringField(PName, Exported);
+			}
+			Obj->SetObjectField(TEXT("values"), Values);
 		}
 		return Obj;
 	};
@@ -1704,10 +1773,30 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorsByClass(const TSharedPtr<FJsonOb
 	if (auto Err = RequireString(Params, TEXT("className"), ClassName)) return Err;
 
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	const bool bIncludeTransform = OptionalBool(Params, TEXT("includeTransform"), false);
 	const bool bIncludeBounds = OptionalBool(Params, TEXT("includeBounds"), false);
 	UWorld* World = ResolveWorldScope(WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
+
+	// #675: resolve className to an actual UClass so Blueprint subclasses of a
+	// native base match (IsChildOf), not just actors whose class-name string
+	// happens to contain the query. Accepts a short native name ("StaticMeshActor"),
+	// a /Script path, or a Blueprint class path ("/Game/BP_Foo.BP_Foo_C").
+	const bool bMatchSubclasses = OptionalBool(Params, TEXT("matchSubclasses"), true);
+	// includeTransform kept as an alias for includeTransforms.
+	const bool bIncludeTransforms =
+		OptionalBool(Params, TEXT("includeTransforms"), OptionalBool(Params, TEXT("includeTransform"), true));
+	UClass* TargetClass = nullptr;
+	if (bMatchSubclasses)
+	{
+		TargetClass = FindClassByShortName(ClassName);
+		if (!TargetClass) TargetClass = LoadClass<UObject>(nullptr, *ClassName);
+		if (!TargetClass) TargetClass = LoadObject<UClass>(nullptr, *ClassName);
+		// Blueprint class path given without the _C suffix.
+		if (!TargetClass && !ClassName.EndsWith(TEXT("_C")) && ClassName.StartsWith(TEXT("/")))
+		{
+			TargetClass = LoadObject<UClass>(nullptr, *(ClassName + TEXT("_C")));
+		}
+	}
 
 	TArray<TSharedPtr<FJsonValue>> Out;
 	for (TActorIterator<AActor> It(World); It; ++It)
@@ -1715,17 +1804,21 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorsByClass(const TSharedPtr<FJsonOb
 		AActor* A = *It;
 		if (!A) continue;
 		FString CName = A->GetClass()->GetName();
-		if (CName == ClassName || (A->GetClass()->IsChildOf(AActor::StaticClass()) && CName.Contains(ClassName)))
+		const bool bMatch = TargetClass
+			? A->GetClass()->IsChildOf(TargetClass)
+			: (CName == ClassName || (A->GetClass()->IsChildOf(AActor::StaticClass()) && CName.Contains(ClassName)));
+		if (bMatch)
 		{
 			TSharedPtr<FJsonObject> E = MakeShared<FJsonObject>();
 			E->SetStringField(TEXT("label"), A->GetActorLabel());
 			E->SetStringField(TEXT("class"), CName);
 			E->SetStringField(TEXT("path"), A->GetPathName());
-			if (bIncludeTransform)
+			if (bIncludeTransforms)
 			{
-				E->SetObjectField(TEXT("location"), MCPVec3ToJsonObject(A->GetActorLocation()));
-				E->SetObjectField(TEXT("rotation"), MCPRotatorToJsonObject(A->GetActorRotation()));
-				E->SetObjectField(TEXT("scale"), MCPVec3ToJsonObject(A->GetActorScale3D()));
+				const FTransform Xf = A->GetActorTransform();
+				E->SetObjectField(TEXT("location"), MCPVec3ToJsonObject(Xf.GetLocation()));
+				E->SetObjectField(TEXT("rotation"), MCPRotatorToJsonObject(Xf.Rotator()));
+				E->SetObjectField(TEXT("scale"), MCPVec3ToJsonObject(Xf.GetScale3D()));
 			}
 			if (bIncludeBounds)
 			{
@@ -1744,6 +1837,11 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorsByClass(const TSharedPtr<FJsonOb
 	auto Result = MCPSuccess();
 	Result->SetArrayField(TEXT("actors"), Out);
 	Result->SetNumberField(TEXT("count"), Out.Num());
+	if (bMatchSubclasses && !TargetClass)
+	{
+		Result->SetStringField(TEXT("note"),
+			TEXT("className did not resolve to a loaded UClass; fell back to name-substring matching. Pass a /Script/<Module>.<Class> path or a Blueprint class path for subclass matching."));
+	}
 	return MCPResult(Result);
 }
 
@@ -1989,9 +2087,11 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorBounds(const TSharedPtr<FJsonObje
 	FString ActorLabel;
 	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
 
-	REQUIRE_EDITOR_WORLD(World);
+	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
+	UWorld* World = ResolveWorldScope(WorldScope);
+	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
 
-	AActor* Actor = FindActorByLabel(World, ActorLabel);
+	AActor* Actor = FindActorByLabelNameOrPath(World, ActorLabel);
 	if (!Actor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
@@ -1999,7 +2099,21 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorBounds(const TSharedPtr<FJsonObje
 
 	FVector Origin;
 	FVector Extent;
-	Actor->GetActorBounds(false, Origin, Extent);
+	const bool bOnlyColliding = OptionalBool(Params, TEXT("onlyColliding"), false);
+	// #677: GetActorBounds(false) returns a degenerate box for skeletal-mesh
+	// actors whose component bounds aren't primed. GetComponentsBoundingBox
+	// (non-colliding=true) aggregates every primitive component's real bounds,
+	// which is robust for skinned meshes.
+	FBox Box = Actor->GetComponentsBoundingBox(/*bNonColliding*/ !bOnlyColliding, /*bIncludeFromChildActors*/ true);
+	if (Box.IsValid)
+	{
+		Origin = Box.GetCenter();
+		Extent = Box.GetExtent();
+	}
+	else
+	{
+		Actor->GetActorBounds(bOnlyColliding, Origin, Extent);
+	}
 
 	TSharedPtr<FJsonObject> OriginObj = MakeShared<FJsonObject>();
 	OriginObj->SetNumberField(TEXT("x"), Origin.X);
@@ -2482,6 +2596,362 @@ TSharedPtr<FJsonValue> FLevelHandlers::AddHismcInstances(const TSharedPtr<FJsonO
 	Result->SetNumberField(TEXT("totalInstances"), ISMC->GetInstanceCount());
 	Result->SetArrayField(TEXT("instanceIndices"), IndicesJson);
 	Result->SetBoolField(TEXT("worldSpace"), bWorldSpace);
+	return MCPResult(Result);
+}
+
+namespace
+{
+	// Resolve an ISMC/HISMC on an actor by optional name (first match if empty).
+	UInstancedStaticMeshComponent* ResolveISMC(AActor* Actor, const FString& ComponentName)
+	{
+		if (!Actor) return nullptr;
+		for (UActorComponent* Comp : Actor->GetComponents())
+		{
+			UInstancedStaticMeshComponent* AsISMC = Cast<UInstancedStaticMeshComponent>(Comp);
+			if (!AsISMC) continue;
+			if (ComponentName.IsEmpty() || AsISMC->GetName() == ComponentName) return AsISMC;
+		}
+		return nullptr;
+	}
+}
+
+// #697: read back every instance transform on an actor's ISMC/HISMC.
+TSharedPtr<FJsonValue> FLevelHandlers::GetInstanceTransforms(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+	FString ActorLabel;
+	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	AActor* Actor = FindActorByLabel(World, ActorLabel);
+	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+
+	const FString ComponentName = OptionalString(Params, TEXT("componentName"));
+	UInstancedStaticMeshComponent* ISMC = ResolveISMC(Actor, ComponentName);
+	if (!ISMC) return MCPError(FString::Printf(TEXT("No InstancedStaticMeshComponent on actor '%s'"), *ActorLabel));
+
+	const bool bWorldSpace = OptionalBool(Params, TEXT("worldSpace"), true);
+	TArray<TSharedPtr<FJsonValue>> Instances;
+	const int32 Count = ISMC->GetInstanceCount();
+	for (int32 i = 0; i < Count; ++i)
+	{
+		FTransform Xf;
+		if (!ISMC->GetInstanceTransform(i, Xf, bWorldSpace)) continue;
+		TSharedPtr<FJsonObject> E = MakeShared<FJsonObject>();
+		E->SetNumberField(TEXT("index"), i);
+		E->SetObjectField(TEXT("location"), MCPVec3ToJsonObject(Xf.GetLocation()));
+		E->SetObjectField(TEXT("rotation"), MCPRotatorToJsonObject(Xf.Rotator()));
+		E->SetObjectField(TEXT("scale"), MCPVec3ToJsonObject(Xf.GetScale3D()));
+		Instances.Add(MakeShared<FJsonValueObject>(E));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("componentName"), ISMC->GetName());
+	Result->SetNumberField(TEXT("count"), Count);
+	Result->SetBoolField(TEXT("worldSpace"), bWorldSpace);
+	Result->SetArrayField(TEXT("instances"), Instances);
+	return MCPResult(Result);
+}
+
+// #697: update a single instance transform on an ISMC/HISMC by index.
+TSharedPtr<FJsonValue> FLevelHandlers::UpdateInstanceTransform(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+	FString ActorLabel;
+	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	AActor* Actor = FindActorByLabel(World, ActorLabel);
+	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+
+	const FString ComponentName = OptionalString(Params, TEXT("componentName"));
+	UInstancedStaticMeshComponent* ISMC = ResolveISMC(Actor, ComponentName);
+	if (!ISMC) return MCPError(FString::Printf(TEXT("No InstancedStaticMeshComponent on actor '%s'"), *ActorLabel));
+
+	if (!Params->HasField(TEXT("index"))) return MCPError(TEXT("Missing 'index'"));
+	const int32 Index = OptionalInt(Params, TEXT("index"), -1);
+	if (Index < 0 || Index >= ISMC->GetInstanceCount())
+	{
+		return MCPError(FString::Printf(TEXT("index %d out of range (0..%d)"), Index, ISMC->GetInstanceCount() - 1));
+	}
+	const bool bWorldSpace = OptionalBool(Params, TEXT("worldSpace"), true);
+
+	// Start from the current transform so partially-specified updates preserve
+	// unspecified components.
+	FTransform Xf;
+	ISMC->GetInstanceTransform(Index, Xf, bWorldSpace);
+	FVector Loc = Xf.GetLocation();
+	FRotator Rot = Xf.Rotator();
+	FVector Scale = Xf.GetScale3D();
+	const TSharedPtr<FJsonObject>* Sub = nullptr;
+	if (Params->TryGetObjectField(TEXT("location"), Sub) && Sub) ReadVec3Fields(*Sub, Loc);
+	if (Params->TryGetObjectField(TEXT("rotation"), Sub) && Sub) ReadRotatorFields(*Sub, Rot);
+	if (Params->TryGetObjectField(TEXT("scale"), Sub) && Sub) ReadVec3Fields(*Sub, Scale);
+
+	ISMC->Modify();
+	const bool bOk = ISMC->UpdateInstanceTransform(Index, FTransform(Rot, Loc, Scale), bWorldSpace, /*bMarkRenderStateDirty*/ true, /*bTeleport*/ true);
+	if (!bOk) return MCPError(FString::Printf(TEXT("UpdateInstanceTransform failed for index %d"), Index));
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("componentName"), ISMC->GetName());
+	Result->SetNumberField(TEXT("index"), Index);
+	return MCPResult(Result);
+}
+
+// #697: remove a single instance on an ISMC/HISMC by index.
+TSharedPtr<FJsonValue> FLevelHandlers::RemoveInstance(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+	FString ActorLabel;
+	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	AActor* Actor = FindActorByLabel(World, ActorLabel);
+	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+
+	const FString ComponentName = OptionalString(Params, TEXT("componentName"));
+	UInstancedStaticMeshComponent* ISMC = ResolveISMC(Actor, ComponentName);
+	if (!ISMC) return MCPError(FString::Printf(TEXT("No InstancedStaticMeshComponent on actor '%s'"), *ActorLabel));
+
+	if (!Params->HasField(TEXT("index"))) return MCPError(TEXT("Missing 'index'"));
+	const int32 Index = OptionalInt(Params, TEXT("index"), -1);
+	if (Index < 0 || Index >= ISMC->GetInstanceCount())
+	{
+		return MCPError(FString::Printf(TEXT("index %d out of range (0..%d)"), Index, ISMC->GetInstanceCount() - 1));
+	}
+
+	ISMC->Modify();
+	const bool bOk = ISMC->RemoveInstance(Index);
+	ISMC->MarkRenderStateDirty();
+
+	auto Result = MCPSuccess();
+	Result->SetBoolField(TEXT("removed"), bOk);
+	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("componentName"), ISMC->GetName());
+	Result->SetNumberField(TEXT("remainingInstances"), ISMC->GetInstanceCount());
+	return MCPResult(Result);
+}
+
+// #696: enable + force-build Nanite on a UStaticMesh asset.
+TSharedPtr<FJsonValue> FLevelHandlers::SetNaniteSettings(const TSharedPtr<FJsonObject>& Params)
+{
+#if WITH_EDITOR
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("meshPath"), AssetPath)) return Err;
+	REQUIRE_ASSET(UStaticMesh, Mesh, AssetPath);
+
+	const bool bEnabled = OptionalBool(Params, TEXT("enabled"), true);
+	Mesh->Modify();
+	// Use the accessor pair (GetNaniteSettings/SetNaniteSettings) — direct
+	// member access to NaniteSettings is deprecated in 5.7+.
+	FMeshNaniteSettings Settings = Mesh->GetNaniteSettings();
+	Settings.bEnabled = bEnabled;
+	if (Params->HasField(TEXT("positionPrecision")))
+	{
+		Settings.PositionPrecision = OptionalInt(Params, TEXT("positionPrecision"), Settings.PositionPrecision);
+	}
+	Mesh->SetNaniteSettings(Settings);
+
+	// Force a rebuild so the Nanite data is generated immediately rather than
+	// on next cook. Build() is the editor's explicit rebuild entry point.
+	Mesh->Build(/*bSilent*/ true);
+	Mesh->PostEditChange();
+	const bool bSaved = SaveAssetPackage(Mesh);
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("assetPath"), Mesh->GetPathName());
+	Result->SetBoolField(TEXT("naniteEnabled"), Mesh->GetNaniteSettings().bEnabled != 0);
+	Result->SetNumberField(TEXT("positionPrecision"), Mesh->GetNaniteSettings().PositionPrecision);
+	Result->SetBoolField(TEXT("saved"), bSaved);
+	return MCPResult(Result);
+#else
+	return MCPError(TEXT("SetNaniteSettings requires the editor"));
+#endif
+}
+
+// #696: read a UStaticMesh's Nanite state.
+TSharedPtr<FJsonValue> FLevelHandlers::GetNaniteInfo(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("meshPath"), AssetPath)) return Err;
+	REQUIRE_ASSET(UStaticMesh, Mesh, AssetPath);
+
+	const FMeshNaniteSettings& Settings = Mesh->GetNaniteSettings();
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("assetPath"), Mesh->GetPathName());
+	Result->SetBoolField(TEXT("naniteEnabled"), Settings.bEnabled != 0);
+	Result->SetNumberField(TEXT("positionPrecision"), Settings.PositionPrecision);
+	Result->SetNumberField(TEXT("numLODs"), Mesh->GetNumLODs());
+	return MCPResult(Result);
+}
+
+// #637: export a selected actor's skeletal/static mesh to FBX and write a
+// metadata sidecar JSON (actor transform, mesh, materials, skeleton) that a
+// downstream bridge (e.g. MetaTailor) can consume alongside the FBX.
+TSharedPtr<FJsonValue> FLevelHandlers::ExportActorFbx(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+	FString ActorLabel;
+	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	FString OutputPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("outputPath"), TEXT("filePath"), OutputPath)) return Err;
+
+	AActor* Actor = FindActorByLabelNameOrPath(World, ActorLabel);
+	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+
+	// Resolve the mesh asset from the actor (skeletal first, then static).
+	UObject* MeshAsset = nullptr;
+	FString MeshKind;
+	TArray<FString> MaterialPaths;
+	FString SkeletonPath;
+	if (USkeletalMeshComponent* SKC = Actor->FindComponentByClass<USkeletalMeshComponent>())
+	{
+		if (USkeletalMesh* SM = Cast<USkeletalMesh>(SKC->GetSkinnedAsset()))
+		{
+			MeshAsset = SM; MeshKind = TEXT("SkeletalMesh");
+			if (USkeleton* Sk = SM->GetSkeleton()) SkeletonPath = Sk->GetPathName();
+			for (int32 i = 0; i < SKC->GetNumMaterials(); ++i)
+			{
+				if (UMaterialInterface* M = SKC->GetMaterial(i)) MaterialPaths.Add(M->GetPathName());
+			}
+		}
+	}
+	if (!MeshAsset)
+	{
+		if (UStaticMeshComponent* SMC = Actor->FindComponentByClass<UStaticMeshComponent>())
+		{
+			if (UStaticMesh* SM = SMC->GetStaticMesh())
+			{
+				MeshAsset = SM; MeshKind = TEXT("StaticMesh");
+				for (int32 i = 0; i < SMC->GetNumMaterials(); ++i)
+				{
+					if (UMaterialInterface* M = SMC->GetMaterial(i)) MaterialPaths.Add(M->GetPathName());
+				}
+			}
+		}
+	}
+	if (!MeshAsset) return MCPError(FString::Printf(TEXT("Actor '%s' has no skeletal/static mesh to export"), *ActorLabel));
+
+	FString AbsPath = OutputPath;
+	if (FPaths::IsRelative(AbsPath)) AbsPath = FPaths::Combine(FPaths::ProjectDir(), AbsPath);
+	if (!AbsPath.EndsWith(TEXT(".fbx"))) AbsPath += TEXT(".fbx");
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(AbsPath), /*Tree*/ true);
+
+	UAssetExportTask* Task = NewObject<UAssetExportTask>();
+	FGCRootScope TaskRoot(Task);
+	Task->Object = MeshAsset;
+	Task->Filename = AbsPath;
+	Task->bAutomated = true;
+	Task->bPrompt = false;
+	Task->bReplaceIdentical = true;
+	UFbxExportOption* Options = NewObject<UFbxExportOption>();
+	Task->Options = Options;
+	const bool bExported = UExporter::RunAssetExportTask(Task);
+	if (!bExported) return MCPError(FString::Printf(TEXT("FBX export failed for %s"), *MeshAsset->GetPathName()));
+
+	// Metadata sidecar next to the FBX.
+	const FTransform Xf = Actor->GetActorTransform();
+	TSharedPtr<FJsonObject> Meta = MakeShared<FJsonObject>();
+	Meta->SetStringField(TEXT("actorLabel"), Actor->GetActorLabel());
+	Meta->SetStringField(TEXT("meshKind"), MeshKind);
+	Meta->SetStringField(TEXT("mesh"), MeshAsset->GetPathName());
+	if (!SkeletonPath.IsEmpty()) Meta->SetStringField(TEXT("skeleton"), SkeletonPath);
+	Meta->SetStringField(TEXT("fbx"), AbsPath);
+	Meta->SetObjectField(TEXT("location"), MCPVec3ToJsonObject(Xf.GetLocation()));
+	Meta->SetObjectField(TEXT("rotation"), MCPRotatorToJsonObject(Xf.Rotator()));
+	Meta->SetObjectField(TEXT("scale"), MCPVec3ToJsonObject(Xf.GetScale3D()));
+	TArray<TSharedPtr<FJsonValue>> MatArr;
+	for (const FString& MP : MaterialPaths) MatArr.Add(MakeShared<FJsonValueString>(MP));
+	Meta->SetArrayField(TEXT("materials"), MatArr);
+
+	FString MetaStr;
+	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&MetaStr);
+	FJsonSerializer::Serialize(Meta.ToSharedRef(), Writer);
+	const FString MetaPath = FPaths::ChangeExtension(AbsPath, TEXT("json"));
+	FFileHelper::SaveStringToFile(MetaStr, *MetaPath);
+
+	const int64 FbxSize = IFileManager::Get().FileSize(*AbsPath);
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetStringField(TEXT("actorLabel"), Actor->GetActorLabel());
+	Result->SetStringField(TEXT("fbx"), AbsPath);
+	Result->SetStringField(TEXT("metadata"), MetaPath);
+	Result->SetStringField(TEXT("meshKind"), MeshKind);
+	Result->SetNumberField(TEXT("fbxSizeBytes"), (double)FbxSize);
+	return MCPResult(Result);
+}
+
+// #679/#677: spawn a SkeletalMeshActor with a mesh (+ optional materials and
+// single-node animation) for visual and deform verification.
+TSharedPtr<FJsonValue> FLevelHandlers::SpawnSkeletalMeshActor(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+
+	FString MeshPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("skeletalMesh"), TEXT("meshPath"), MeshPath)) return Err;
+	REQUIRE_ASSET(USkeletalMesh, Mesh, MeshPath);
+
+	const FString Label = OptionalString(Params, TEXT("label"));
+	if (TSharedPtr<FJsonValue> Existing = MCPCheckActorLabelExists(World, Label, OptionalString(Params, TEXT("onConflict")), TEXT("SkeletalMeshActor")))
+	{
+		return Existing;
+	}
+
+	const FTransform SpawnXf = OptionalTransform(Params, TEXT("transform"));
+	FVector Loc = OptionalVec3(Params, TEXT("location"), SpawnXf.GetLocation());
+	FRotator Rot = OptionalRotator(Params, TEXT("rotation"), SpawnXf.Rotator());
+	FVector Scale = OptionalVec3(Params, TEXT("scale"), SpawnXf.GetScale3D());
+
+	FActorSpawnParameters SpawnParams;
+	ASkeletalMeshActor* Actor = World->SpawnActor<ASkeletalMeshActor>(ASkeletalMeshActor::StaticClass(), FTransform(Rot, Loc, Scale), SpawnParams);
+	if (!Actor) return MCPError(TEXT("Failed to spawn SkeletalMeshActor"));
+	if (!Label.IsEmpty()) Actor->SetActorLabel(Label);
+
+	USkeletalMeshComponent* Comp = Actor->GetSkeletalMeshComponent();
+	if (Comp)
+	{
+		Comp->SetSkeletalMeshAsset(Mesh);
+
+		// Optional per-slot material overrides.
+		const TArray<TSharedPtr<FJsonValue>>* Mats = nullptr;
+		if (Params->TryGetArrayField(TEXT("materials"), Mats) && Mats)
+		{
+			for (int32 i = 0; i < Mats->Num(); ++i)
+			{
+				FString MatPath;
+				if ((*Mats)[i].IsValid() && (*Mats)[i]->TryGetString(MatPath) && !MatPath.IsEmpty())
+				{
+					if (UMaterialInterface* Mat = LoadAssetByPath<UMaterialInterface>(MatPath))
+					{
+						Comp->SetMaterial(i, Mat);
+					}
+				}
+			}
+		}
+
+		// Optional single-node animation preview (visual deform check).
+		FString AnimPath = OptionalString(Params, TEXT("animSequence"));
+		if (!AnimPath.IsEmpty())
+		{
+			if (UAnimSequence* Anim = LoadAssetByPath<UAnimSequence>(AnimPath))
+			{
+				Comp->SetAnimationMode(EAnimationMode::AnimationSingleNode);
+				Comp->SetAnimation(Anim);
+				Comp->Play(OptionalBool(Params, TEXT("loop"), true));
+			}
+		}
+	}
+
+	const FVector BoxExtent = Actor->GetComponentsBoundingBox(true).GetExtent();
+
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetStringField(TEXT("actorLabel"), Actor->GetActorLabel());
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
+	Result->SetStringField(TEXT("skeletalMesh"), Mesh->GetPathName());
+	Result->SetObjectField(TEXT("location"), MCPVec3ToJsonObject(Loc));
+	Result->SetObjectField(TEXT("boxExtent"), MCPVec3ToJsonObject(BoxExtent));
+	TSharedPtr<FJsonObject> Rb = MakeShared<FJsonObject>();
+	Rb->SetStringField(TEXT("actorLabel"), Actor->GetActorLabel());
+	MCPSetRollback(Result, TEXT("delete_actor"), Rb);
 	return MCPResult(Result);
 }
 

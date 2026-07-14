@@ -3,6 +3,8 @@
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 #include "HandlerAssetCreate.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "MaterialDomain.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInstance.h"
@@ -1428,17 +1430,60 @@ TSharedPtr<FJsonValue> FMaterialHandlers::SetMaterialParameter(const TSharedPtr<
 	}
 	else if (TypeLower == TEXT("vector"))
 	{
-		const TSharedPtr<FJsonObject>* ValueObj = nullptr;
-		if (!Params->TryGetObjectField(TEXT("value"), ValueObj))
-		{
-			return MCPError(TEXT("Missing 'value' object field (r,g,b,a) for vector parameter"));
-		}
-
+		// #670: accept the vector payload as an object {r,g,b,a}, an array
+		// [r,g,b,a], or a double-encoded string ("{\"r\":..}" or "(R=..,G=..)").
 		double R = 0.0, G = 0.0, B = 0.0, A = 1.0;
-		(*ValueObj)->TryGetNumberField(TEXT("r"), R);
-		(*ValueObj)->TryGetNumberField(TEXT("g"), G);
-		(*ValueObj)->TryGetNumberField(TEXT("b"), B);
-		(*ValueObj)->TryGetNumberField(TEXT("a"), A);
+		bool bParsed = false;
+		const TSharedPtr<FJsonObject>* ValueObj = nullptr;
+		const TArray<TSharedPtr<FJsonValue>>* ValueArr = nullptr;
+		if (Params->TryGetObjectField(TEXT("value"), ValueObj) && ValueObj && (*ValueObj).IsValid())
+		{
+			(*ValueObj)->TryGetNumberField(TEXT("r"), R);
+			(*ValueObj)->TryGetNumberField(TEXT("g"), G);
+			(*ValueObj)->TryGetNumberField(TEXT("b"), B);
+			(*ValueObj)->TryGetNumberField(TEXT("a"), A);
+			bParsed = true;
+		}
+		else if (Params->TryGetArrayField(TEXT("value"), ValueArr) && ValueArr)
+		{
+			if (ValueArr->Num() > 0) (*ValueArr)[0]->TryGetNumber(R);
+			if (ValueArr->Num() > 1) (*ValueArr)[1]->TryGetNumber(G);
+			if (ValueArr->Num() > 2) (*ValueArr)[2]->TryGetNumber(B);
+			if (ValueArr->Num() > 3) (*ValueArr)[3]->TryGetNumber(A);
+			bParsed = true;
+		}
+		else
+		{
+			FString ValueStr;
+			if (Params->TryGetStringField(TEXT("value"), ValueStr) && !ValueStr.IsEmpty())
+			{
+				// Try JSON object first.
+				TSharedPtr<FJsonObject> Reparsed;
+				TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ValueStr);
+				if (FJsonSerializer::Deserialize(Reader, Reparsed) && Reparsed.IsValid())
+				{
+					Reparsed->TryGetNumberField(TEXT("r"), R);
+					Reparsed->TryGetNumberField(TEXT("g"), G);
+					Reparsed->TryGetNumberField(TEXT("b"), B);
+					Reparsed->TryGetNumberField(TEXT("a"), A);
+					bParsed = true;
+				}
+				else
+				{
+					// Fall back to UE struct text "(R=..,G=..,B=..,A=..)".
+					FLinearColor Parsed;
+					if (Parsed.InitFromString(ValueStr))
+					{
+						R = Parsed.R; G = Parsed.G; B = Parsed.B; A = Parsed.A;
+						bParsed = true;
+					}
+				}
+			}
+		}
+		if (!bParsed)
+		{
+			return MCPError(TEXT("Missing/unparseable 'value' for vector parameter - pass {r,g,b,a}, [r,g,b,a], or '(R=..,G=..,B=..,A=..)'"));
+		}
 
 		FLinearColor ColorValue(R, G, B, A);
 		FLinearColor PrevColor;

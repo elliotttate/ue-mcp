@@ -142,7 +142,19 @@ const PARAM_OVERRIDES = {
   build_project:               { dryRun: true },
   read_editor_log:             { tailLines: 1 },
   get_crash_reports:           { maxReports: 1 },
+  // Discover-only: a no-match filter so smoke doesn't actually run a test suite.
+  run_automation_tests:        { filter: "__smoke_no_match__", maxTests: 0 },
 };
+
+// Handlers the smoke sweep must NOT invoke: they trigger Live Coding, which
+// disrupts a developer's own Live Coding session and can load stale hot-patches
+// over a freshly built DLL. Plugin changes are validated by full UBT rebuilds,
+// never Live Coding, so these are skipped (still counted as covered).
+const SKIP_METHODS = new Set([
+  "live_coding_compile",
+  "live_coding_status",
+  "hot_reload",
+]);
 
 // Direct RPC helper for setup/teardown (separate from rpcCall which classifies
 // for smoke summary). Returns {result, error} from the JSON-RPC frame; resolves
@@ -292,6 +304,11 @@ async function main() {
 
   for (const { method, file } of handlers) {
     const id = nextId++;
+    if (SKIP_METHODS.has(method)) {
+      results.push({ status: "SKIPPED", method, file });
+      process.stdout.write(`\r  [${id}/${handlers.length}] ${method} ${YELLOW}SKIPPED (never invoke Live Coding)${RESET}\n`);
+      continue;
+    }
     process.stdout.write(`${DIM}  [${id}/${handlers.length}] ${method} ...${RESET}`);
     const result = await rpcCall(ws, method, id);
     result.method = method;
@@ -336,6 +353,7 @@ async function main() {
   const successes = results.filter((r) => r.status === "SUCCESS");
   const expectedErrors = results.filter((r) => r.status === "EXPECTED_ERROR");
   const failures = results.filter((r) => r.status === "FAILURE");
+  const skipped = results.filter((r) => r.status === "SKIPPED");
 
   const COL_STATUS = 18;
   const COL_METHOD = 45;
@@ -364,6 +382,7 @@ async function main() {
   console.log(`  ${GREEN}Success        : ${successes.length}${RESET}`);
   console.log(`  ${YELLOW}Expected Error : ${expectedErrors.length}${RESET}`);
   console.log(`  ${RED}Failure        : ${failures.length}${RESET}`);
+  console.log(`  ${YELLOW}Skipped        : ${skipped.length} (Live Coding handlers)${RESET}`);
 
   if (failures.length > 0) {
     console.log(`\n${RED}${BOLD}SMOKE TEST FAILED${RESET} — ${failures.length} handler(s) did not respond.\n`);

@@ -34,6 +34,10 @@ private:
 	static TSharedPtr<FJsonValue> RenameFunction(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> DeleteFunction(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CreateBlueprintInterface(const TSharedPtr<FJsonObject>& Params);
+	// #688: override an inherited interface / parent (virtual) function with the
+	// correct signature so it binds as the override; plus list what can be overridden.
+	static TSharedPtr<FJsonValue> OverrideFunction(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ListOverridableFunctions(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ConnectPins(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> DeleteNode(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetNodeProperty(const TSharedPtr<FJsonObject>& Params);

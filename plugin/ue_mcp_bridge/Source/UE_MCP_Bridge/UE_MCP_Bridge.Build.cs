@@ -25,15 +25,23 @@ public class UE_MCP_Bridge : ModuleRules
 				"AnimGraph",
 				"ApplicationCore",
 				"AnimationEditor",
+				"AnimationModifiers",
 				"AssetRegistry",
 				"AssetTools",
 				"AutomationController",
 				"AutomationTest",
 				"AudioEditor",
+				"AudioMixer",
+				"AudioExtensions",
+				"MetasoundEngine",
+				"MetasoundFrontend",
+				"MetasoundGraphCore",
+				"Synthesis",
 				"BSPUtils",
 				"BlueprintEditorLibrary",
 				"BlueprintGraph",
 				"Blutility",
+				"Chooser",
 				"ContentBrowser",
 				"ContentBrowserData",
 				"ControlRig",
@@ -69,6 +77,7 @@ public class UE_MCP_Bridge : ModuleRules
 				"PCG",
 				"PCGEditor",
 				"PoseSearch",
+				"PoseSearchEditor",
 				"PropertyBindingUtils",
 				"Projects",
 				"PropertyEditor",
@@ -82,6 +91,8 @@ public class UE_MCP_Bridge : ModuleRules
 				"StateTreeModule",
 				"StateTreeEditorModule",
 				"StaticMeshDescription",
+				"ClothingSystemRuntimeCommon",
+				"ClothingSystemRuntimeInterface",
 				"StructUtils",
 				"SubobjectDataInterface",
 				"ToolMenus",
@@ -100,6 +111,24 @@ public class UE_MCP_Bridge : ModuleRules
 		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
 			PrivateDependencyModuleNames.Add("LiveCoding");
+		}
+
+		// Fab is Epic's marketplace plugin. It ships enabled by default on UE 5.8
+		// but is absent on older engines and can be disabled, so we do not hard
+		// depend on it: detect the plugin on disk and only then link its native
+		// import/cache API, guarding those code paths with WITH_FAB_PLUGIN. When
+		// absent, the Fab handlers still register and fall back to console-command
+		// paths (login/sync/clear) or return a clean "not available" error.
+		bool bFabPluginPresent = System.IO.Directory.Exists(
+			System.IO.Path.Combine(EngineDirectory, "Plugins", "Fab"));
+		if (bFabPluginPresent && Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.Add("Fab");
+			PublicDefinitions.Add("WITH_FAB_PLUGIN=1");
+		}
+		else
+		{
+			PublicDefinitions.Add("WITH_FAB_PLUGIN=0");
 		}
 	}
 }

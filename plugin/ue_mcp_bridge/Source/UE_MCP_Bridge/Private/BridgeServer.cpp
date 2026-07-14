@@ -37,6 +37,9 @@
 #include "Handlers/ProjectIntelligenceHandlers.h"
 #include "Handlers/XRHandlers.h"
 #include "Handlers/SourceControlHandlers.h"
+#include "Handlers/ChooserHandlers.h"
+#include "Handlers/EpicHandlers.h"
+#include "Handlers/FabHandlers.h"
 
 // Platform-specific socket includes
 #if PLATFORM_WINDOWS
@@ -99,6 +102,9 @@ FMCPBridgeServer::FMCPBridgeServer(int32 Port)
 	FXRHandlers::RegisterHandlers(HandlerRegistry);
 	// Revision control (Perforce/Git/Plastic) file operations.
 	FSourceControlHandlers::RegisterHandlers(HandlerRegistry);
+	FChooserHandlers::RegisterHandlers(HandlerRegistry);
+	FEpicHandlers::RegisterHandlers(HandlerRegistry);
+	FFabHandlers::RegisterHandlers(HandlerRegistry);
 }
 
 FMCPBridgeServer::~FMCPBridgeServer()

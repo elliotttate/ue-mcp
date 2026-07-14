@@ -50,6 +50,9 @@ private:
 	static TSharedPtr<FJsonValue> SetBoneKeyframes(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> BakeKeyframesBatch(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetBoneTransforms(const TSharedPtr<FJsonObject>& Params);
+	// #656: compare an animation/pose asset's curve names against a skeletal
+	// mesh's morph target names and report matches/mismatches.
+	static TSharedPtr<FJsonValue> CompareCurvesToMorphTargets(const TSharedPtr<FJsonObject>& Params);
 
 	// Montage editing
 	static TSharedPtr<FJsonValue> SetMontageSequence(const TSharedPtr<FJsonObject>& Params);
@@ -61,13 +64,22 @@ private:
 	static TSharedPtr<FJsonValue> AddTransition(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetStateAnimation(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetTransitionBlend(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetTransitionCondition(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadStateMachine(const TSharedPtr<FJsonObject>& Params);
 
 	// AnimGraph inspection (#23 / #91)
 	static TSharedPtr<FJsonValue> ReadAnimGraph(const TSharedPtr<FJsonObject>& Params);
+	// #657: deep-dump the FAnimNode_* struct of anim graph nodes (PoseDriver
+	// PoseTargets/PoseAsset/RBF params, etc.) that read_anim_graph omits.
+	static TSharedPtr<FJsonValue> InspectAnimNodes(const TSharedPtr<FJsonObject>& Params);
 
 	// Float curve authoring (#79 / #24)
 	static TSharedPtr<FJsonValue> AddCurve(const TSharedPtr<FJsonObject>& Params);
+	// #712: set float-curve key VALUES directly (add_curve only names an empty curve).
+	static TSharedPtr<FJsonValue> SetAnimCurveKeys(const TSharedPtr<FJsonObject>& Params);
+	// #712: instantiate + run a UAnimationModifier subclass on an AnimSequence
+	// (e.g. DistanceCurveModifier to bake a Distance curve from root motion).
+	static TSharedPtr<FJsonValue> ApplyAnimationModifier(const TSharedPtr<FJsonObject>& Params);
 
 	// Montage slot & section editing (#78, #27)
 	static TSharedPtr<FJsonValue> SetMontageSlot(const TSharedPtr<FJsonObject>& Params);
@@ -104,6 +116,12 @@ private:
 	// v0.7.11 — issue fixes
 	static TSharedPtr<FJsonValue> CreateIKRetargeter(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadIKRetargeter(const TSharedPtr<FJsonObject>& Params);
+	// #701/#703: IK rig/retargeter authoring tail + batch retarget bake.
+	static TSharedPtr<FJsonValue> SetIKRigMesh(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetIKRetargeterRig(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> AutoAlignRetargetPose(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ResetRetargetPose(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> BatchRetargetAnimations(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetAnimBlueprintSkeleton(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadBoneTrack(const TSharedPtr<FJsonObject>& Params);
 
@@ -115,8 +133,33 @@ private:
 	static TSharedPtr<FJsonValue> CreatePoseSearchDatabase(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetPoseSearchSchema(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AddPoseSearchSequence(const TSharedPtr<FJsonObject>& Params);
+	// #684: bulk clip-list authoring with per-entry flags (mirror/reselection/sampling).
+	static TSharedPtr<FJsonValue> SetPoseSearchClips(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> BuildPoseSearchIndex(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadPoseSearchDatabase(const TSharedPtr<FJsonObject>& Params);
+
+	// Motion Matching content pipeline: schema, mirror table, normalization set,
+	// database tuning (AnimationHandlers_MotionMatching.cpp).
+	static TSharedPtr<FJsonValue> CreatePoseSearchSchema(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> AddPoseSearchSchemaPoseChannel(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> AddPoseSearchSchemaTrajectoryChannel(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ReadPoseSearchSchema(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> CreateMirrorDataTable(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ReadMirrorDataTable(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> CreatePoseSearchNormalizationSet(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetPoseSearchDatabaseSettings(const TSharedPtr<FJsonObject>& Params);
+	// Motion Matching runtime AnimGraph nodes.
+	static TSharedPtr<FJsonValue> AddMotionMatchingNode(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> AddPoseHistoryNode(const TSharedPtr<FJsonObject>& Params);
+	// Drive the MM node's Database from a ChooserTable (runtime database selection).
+	static TSharedPtr<FJsonValue> SetMotionMatchingChooser(const TSharedPtr<FJsonObject>& Params);
+
+	// #713 — distance-matching graph authoring
+	// Add a Sequence Evaluator node (explicit-time player distance matching drives).
+	static TSharedPtr<FJsonValue> AddSequenceEvaluator(const TSharedPtr<FJsonObject>& Params);
+	// Bind a thread-safe anim-node function to a node's OnUpdate/OnBecomeRelevant/
+	// OnInitialUpdate (the mechanism distance matching uses to advance the evaluator).
+	static TSharedPtr<FJsonValue> BindAnimNodeFunction(const TSharedPtr<FJsonObject>& Params);
 
 	// #419/#420 — live-actor skeletal reads + rebind + preview (moved from Level)
 	static TSharedPtr<FJsonValue> GetBoneTransform(const TSharedPtr<FJsonObject>& Params);

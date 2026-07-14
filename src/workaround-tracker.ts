@@ -7,6 +7,10 @@ export interface WorkaroundEntry {
   code: string;
   timestamp: string;
   resultSnippet?: string;
+  /** What the caller said they were trying to do (searchable for #704 overlap report). */
+  taskSummary?: string;
+  /** If a dedicated action matched at execute_python time, "tool(action)". */
+  suggestedTool?: string;
 }
 
 const stack: WorkaroundEntry[] = [];

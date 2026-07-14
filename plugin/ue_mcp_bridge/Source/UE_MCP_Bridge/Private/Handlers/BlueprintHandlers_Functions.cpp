@@ -17,6 +17,8 @@
 #include "K2Node_EditablePinBase.h"
 #include "K2Node_CustomEvent.h"
 #include "K2Node_CallDelegate.h"
+#include "K2Node_Event.h"
+#include "ObjectEditorUtils.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
 #include "Factories/BlueprintFactory.h"
@@ -469,5 +471,252 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::CreateBlueprintInterface(const TShare
 	Payload->SetStringField(TEXT("assetPath"), ObjectPath);
 	MCPSetRollback(Result, TEXT("delete_asset"), Payload);
 
+	return MCPResult(Result);
+}
+
+
+// #688: Create an override for an inherited interface implementation (inherited
+// via the parent class) or an overridable parent virtual function, with the
+// matching signature so it actually binds as the override. Mirrors the editor's
+// SMyBlueprint::ImplementFunction path: resolve the overridable UFunction via
+// GetOverrideFunctionClass, then either place a bOverrideFunction event node
+// (for event-shaped functions) or create a function graph seeded from the
+// override class so the entry/result terminators match the base signature.
+TSharedPtr<FJsonValue> FBlueprintHandlers::OverrideFunction(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+
+	FString FunctionName;
+	if (auto Err = RequireString(Params, TEXT("functionName"), FunctionName)) return Err;
+
+	// 'source' is advisory ("auto"|"interface"|"parent"). GetOverrideFunctionClass
+	// resolves both inherited-interface and parent-virtual functions uniformly, so
+	// we do not branch on it, but it is echoed back for the caller's clarity.
+	const FString Source = OptionalString(Params, TEXT("source"), TEXT("auto"));
+	// Force the function-graph form even when the function could be placed as an
+	// event (e.g. you need an explicit function body with locals / a return path).
+	const bool bPreferFunction = OptionalBool(Params, TEXT("preferFunction"), false);
+
+	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
+	if (!Blueprint)
+	{
+		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	}
+
+	const FName FuncName(*FunctionName);
+
+	// If the caller names an interface that is not yet implemented on this
+	// Blueprint (nor inherited), implement it first so its functions become
+	// overridable. Inherited-via-parent interfaces need no such step.
+	FString InterfacePathStr;
+	if (Params->TryGetStringField(TEXT("interfacePath"), InterfacePathStr) && !InterfacePathStr.IsEmpty())
+	{
+		if (UClass* InterfaceClass = LoadObject<UClass>(nullptr, *InterfacePathStr))
+		{
+			bool bAlready = Blueprint->ParentClass && Blueprint->ParentClass->ImplementsInterface(InterfaceClass);
+			for (const FBPInterfaceDescription& Impl : Blueprint->ImplementedInterfaces)
+			{
+				if (Impl.Interface == InterfaceClass) { bAlready = true; break; }
+			}
+			if (!bAlready)
+			{
+				FBlueprintEditorUtils::ImplementNewInterface(Blueprint, FTopLevelAssetPath(InterfaceClass->GetPathName()));
+			}
+		}
+	}
+
+	// Ensure interface conformance so a freshly-added interface function is picked up.
+	FBlueprintEditorUtils::ConformImplementedInterfaces(Blueprint);
+
+	// Idempotency: an override graph with this name already exists.
+	for (UEdGraph* G : Blueprint->FunctionGraphs)
+	{
+		if (G && G->GetName() == FunctionName)
+		{
+			auto Existed = MCPSuccess();
+			MCPSetExisted(Existed);
+			Existed->SetStringField(TEXT("path"), AssetPath);
+			Existed->SetStringField(TEXT("functionName"), FunctionName);
+			Existed->SetStringField(TEXT("kind"), TEXT("function"));
+			Existed->SetStringField(TEXT("graphName"), FunctionName);
+			return MCPResult(Existed);
+		}
+	}
+
+	UFunction* OverrideFunc = nullptr;
+	UClass* OverrideFuncClass = FBlueprintEditorUtils::GetOverrideFunctionClass(Blueprint, FuncName, &OverrideFunc);
+	if (!OverrideFuncClass || !OverrideFunc)
+	{
+		// Build a short candidate list to guide the caller.
+		TArray<FString> Candidates;
+		UClass* ParentClass = Blueprint->SkeletonGeneratedClass
+			? Blueprint->SkeletonGeneratedClass->GetSuperClass()
+			: Blueprint->ParentClass.Get();
+		if (ParentClass)
+		{
+			for (TFieldIterator<UFunction> It(ParentClass, EFieldIteratorFlags::IncludeSuper); It && Candidates.Num() < 40; ++It)
+			{
+				if (UEdGraphSchema_K2::CanKismetOverrideFunction(*It))
+				{
+					Candidates.AddUnique(It->GetName());
+				}
+			}
+		}
+		return MCPError(FString::Printf(
+			TEXT("No overridable function named '%s' found on the parent class or inherited interfaces. Overridable functions include: %s. Use list_overridable_functions for the full list."),
+			*FunctionName, Candidates.Num() > 0 ? *FString::Join(Candidates, TEXT(", ")) : TEXT("(none)")));
+	}
+
+	// Event-shaped functions (BlueprintImplementableEvent / no return value that
+	// can be placed as an event) go into the event graph as an override event,
+	// matching the editor default, unless the caller forces the function form.
+	UEdGraph* EventGraph = FBlueprintEditorUtils::FindEventGraph(Blueprint);
+	const bool bAsEvent = UEdGraphSchema_K2::FunctionCanBePlacedAsEvent(OverrideFunc) && !bPreferFunction && EventGraph != nullptr;
+
+	if (bAsEvent)
+	{
+		// Idempotency: this override event already exists.
+		if (UK2Node_Event* Existing = FBlueprintEditorUtils::FindOverrideForFunction(Blueprint, OverrideFuncClass, FuncName))
+		{
+			auto Existed = MCPSuccess();
+			MCPSetExisted(Existed);
+			Existed->SetStringField(TEXT("path"), AssetPath);
+			Existed->SetStringField(TEXT("functionName"), FunctionName);
+			Existed->SetStringField(TEXT("kind"), TEXT("event"));
+			Existed->SetStringField(TEXT("graphName"), EventGraph->GetName());
+			Existed->SetStringField(TEXT("nodeId"), Existing->NodeGuid.ToString());
+			return MCPResult(Existed);
+		}
+
+		UK2Node_Event* NewEventNode = NewObject<UK2Node_Event>(EventGraph);
+		NewEventNode->EventReference.SetExternalMember(FuncName, OverrideFuncClass);
+		NewEventNode->bOverrideFunction = true;
+
+		EventGraph->Modify();
+		const FVector2D Location = EventGraph->GetGoodPlaceForNewNode();
+		EventGraph->AddNode(NewEventNode, false, false);
+		NewEventNode->NodePosX = Location.X;
+		NewEventNode->NodePosY = Location.Y;
+		NewEventNode->CreateNewGuid();
+		NewEventNode->PostPlacedNewNode();
+		NewEventNode->AllocateDefaultPins();
+		NewEventNode->ReconstructNode();
+
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		FKismetEditorUtilities::CompileBlueprint(Blueprint);
+		SaveAssetPackage(Blueprint);
+
+		auto Result = MCPSuccess();
+		MCPSetCreated(Result);
+		Result->SetStringField(TEXT("path"), AssetPath);
+		Result->SetStringField(TEXT("functionName"), FunctionName);
+		Result->SetStringField(TEXT("kind"), TEXT("event"));
+		Result->SetStringField(TEXT("graphName"), EventGraph->GetName());
+		Result->SetStringField(TEXT("nodeId"), NewEventNode->NodeGuid.ToString());
+		Result->SetStringField(TEXT("sourceClass"), OverrideFuncClass->GetPathName());
+		Result->SetStringField(TEXT("source"), Source);
+
+		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetStringField(TEXT("path"), AssetPath);
+		Payload->SetStringField(TEXT("graphName"), EventGraph->GetName());
+		Payload->SetStringField(TEXT("nodeId"), NewEventNode->NodeGuid.ToString());
+		MCPSetRollback(Result, TEXT("delete_node"), Payload);
+		return MCPResult(Result);
+	}
+
+	// Function-form override: create the graph seeded from the override class so
+	// the entry/result terminators carry the base function's exact signature.
+	// (This is the fix for #688 - create_function produced a blank graph that
+	// never bound as the override.)
+	UEdGraph* NewGraph = FBlueprintEditorUtils::CreateNewGraph(
+		Blueprint, FuncName, UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
+	if (!NewGraph)
+	{
+		return MCPError(FString::Printf(TEXT("Failed to create override graph: %s"), *FunctionName));
+	}
+
+	FBlueprintEditorUtils::AddFunctionGraph<UClass>(Blueprint, NewGraph, /*bIsUserCreated=*/false, OverrideFuncClass);
+
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+	FKismetEditorUtilities::CompileBlueprint(Blueprint);
+	SaveAssetPackage(Blueprint);
+
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetStringField(TEXT("path"), AssetPath);
+	Result->SetStringField(TEXT("functionName"), FunctionName);
+	Result->SetStringField(TEXT("kind"), TEXT("function"));
+	Result->SetStringField(TEXT("graphName"), NewGraph->GetName());
+	Result->SetStringField(TEXT("sourceClass"), OverrideFuncClass->GetPathName());
+	Result->SetStringField(TEXT("source"), Source);
+
+	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+	Payload->SetStringField(TEXT("path"), AssetPath);
+	Payload->SetStringField(TEXT("functionName"), FunctionName);
+	MCPSetRollback(Result, TEXT("delete_function"), Payload);
+	return MCPResult(Result);
+}
+
+
+// #688: List the functions this Blueprint can override - inherited interface
+// implementations and overridable parent virtuals - so an agent can discover the
+// exact name to pass to override_function. Mirrors the editor's overridable
+// function collection (SMyBlueprint::CollectAllActions).
+TSharedPtr<FJsonValue> FBlueprintHandlers::ListOverridableFunctions(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+
+	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
+	if (!Blueprint)
+	{
+		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	}
+
+	FBlueprintEditorUtils::ConformImplementedInterfaces(Blueprint);
+
+	UClass* ParentClass = Blueprint->SkeletonGeneratedClass
+		? Blueprint->SkeletonGeneratedClass->GetSuperClass()
+		: Blueprint->ParentClass.Get();
+	if (!ParentClass)
+	{
+		return MCPError(TEXT("Blueprint has no resolvable parent class"));
+	}
+
+	// Names already implemented as function graphs on this Blueprint are skipped.
+	TSet<FString> ImplementedNames;
+	for (UEdGraph* G : Blueprint->FunctionGraphs)
+	{
+		if (G) ImplementedNames.Add(G->GetName());
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Functions;
+	for (TFieldIterator<UFunction> It(ParentClass, EFieldIteratorFlags::IncludeSuper); It; ++It)
+	{
+		UFunction* Function = *It;
+		const FName FnName = Function->GetFName();
+		if (!UEdGraphSchema_K2::CanKismetOverrideFunction(Function)) continue;
+		if (ImplementedNames.Contains(Function->GetName())) continue;
+		if (FObjectEditorUtils::IsFunctionHiddenFromClass(Function, ParentClass)) continue;
+		if (!Blueprint->AllowFunctionOverride(Function)) continue;
+
+		UClass* OuterClass = Cast<UClass>(Function->GetOuter());
+		if (OuterClass && FBlueprintEditorUtils::FindOverrideForFunction(Blueprint, OuterClass, FnName)) continue;
+
+		TSharedPtr<FJsonObject> FuncObj = MakeShared<FJsonObject>();
+		FuncObj->SetStringField(TEXT("name"), Function->GetName());
+		FuncObj->SetBoolField(TEXT("canBeEvent"), UEdGraphSchema_K2::FunctionCanBePlacedAsEvent(Function));
+		const bool bIsInterface = OuterClass && OuterClass->HasAnyClassFlags(CLASS_Interface);
+		FuncObj->SetStringField(TEXT("source"), bIsInterface ? TEXT("interface") : TEXT("parent"));
+		if (OuterClass) FuncObj->SetStringField(TEXT("declaringClass"), OuterClass->GetName());
+		Functions.Add(MakeShared<FJsonValueObject>(FuncObj));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("path"), AssetPath);
+	Result->SetStringField(TEXT("parentClass"), ParentClass->GetName());
+	Result->SetArrayField(TEXT("functions"), Functions);
+	Result->SetNumberField(TEXT("count"), Functions.Num());
 	return MCPResult(Result);
 }

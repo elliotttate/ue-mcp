@@ -12,17 +12,44 @@ const IS_WINDOWS = process.platform === "win32";
 const WINDOWS_ONLY_MSG =
   "editor start/stop/restart is Windows-only. On macOS/Linux, start and stop the Unreal Editor manually; ue-mcp will reconnect when the bridge is reachable.";
 
-function findUEBuildTool(enginePath?: string): string | null {
+/** Read EngineAssociation from a .uproject, or null if unreadable. */
+function readEngineAssociation(projectPath: string): string | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(projectPath, "utf-8"));
+    return typeof parsed?.EngineAssociation === "string" ? parsed.EngineAssociation : null;
+  } catch {
+    return null;
+  }
+}
+
+function findUEBuildTool(
+  opts: { enginePath?: string; engineAssociation?: string | null } = {},
+): string | null {
   const envPath = process.env.UE_BUILD_TOOL_PATH;
   if (envPath) return envPath;
 
-  if (enginePath) {
-    const configured = path.join(enginePath, "Engine", "Build", "BatchFiles", IS_WINDOWS ? "Build.bat" : "Build.sh");
+  const scriptName = IS_WINDOWS ? "Build.bat" : "Build.sh";
+
+  // A configured enginePath pins the engine root explicitly and wins over
+  // EngineAssociation discovery.
+  if (opts.enginePath) {
+    const configured = path.join(opts.enginePath, "Engine", "Build", "BatchFiles", scriptName);
     if (fs.existsSync(configured)) return configured;
   }
 
+  // Prefer the engine the project's EngineAssociation actually points at, so a
+  // 5.7 project builds with 5.7's Build tool - not whatever version happens to
+  // sort first in the fallback search below. The editor launch already respects
+  // the association (findEditorExecutable); without this the CLI build could
+  // silently compile against a different engine than the editor runs, masking
+  // API incompatibilities until the editor's own rebuild fails.
+  const associatedRoot = findEngineInstall(opts.engineAssociation ?? null);
+  if (associatedRoot) {
+    const associatedTool = path.join(associatedRoot, "Engine", "Build", "BatchFiles", scriptName);
+    if (fs.existsSync(associatedTool)) return associatedTool;
+  }
+
   const versions = ["5.8", "5.7", "5.6", "5.5", "5.4", "5.3"];
-  const scriptName = IS_WINDOWS ? "Build.bat" : "Build.sh";
 
   const searchRoots: string[] = IS_WINDOWS
     ? [
@@ -77,7 +104,10 @@ function findEditorExecutable(project?: ProjectContext): string | null {
     }
   }
 
-  const buildTool = findUEBuildTool(configuredEngine);
+  const buildTool = findUEBuildTool({
+    enginePath: configuredEngine,
+    engineAssociation: project?.engineAssociation ?? null,
+  });
   if (!buildTool) return null;
 
   const engineRoot = path.resolve(buildTool, "..", "..", "..", "..");
@@ -285,7 +315,11 @@ export async function buildProject(
   projectPath: string,
   opts: { onOutput?: (line: string) => void; enginePath?: string } = {},
 ): Promise<BuildResult> {
-  const buildTool = findUEBuildTool(opts.enginePath);
+  const resolvedPath = path.resolve(projectPath);
+  const buildTool = findUEBuildTool({
+    enginePath: opts.enginePath,
+    engineAssociation: readEngineAssociation(resolvedPath),
+  });
   if (!buildTool) {
     return {
       success: false,
@@ -295,7 +329,6 @@ export async function buildProject(
     };
   }
 
-  const resolvedPath = path.resolve(projectPath);
   if (!fs.existsSync(resolvedPath)) {
     return { success: false, exitCode: null, message: `Project file not found: ${resolvedPath}` };
   }

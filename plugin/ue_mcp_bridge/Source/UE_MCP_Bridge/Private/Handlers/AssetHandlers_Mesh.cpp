@@ -24,6 +24,10 @@
 #include "EditorFramework/AssetImportData.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/SkeletalMesh.h"
+#include "ClothingAsset.h"
+#include "ClothLODData.h"
+#include "PointWeightMap.h"
+#include "ClothConfigBase.h"
 #include "Rendering/SkeletalMeshRenderData.h"
 #include "Animation/Skeleton.h"
 #include "StaticMeshResources.h"
@@ -884,5 +888,134 @@ TSharedPtr<FJsonValue> FAssetHandlers::ConfigureStaticMesh(const TSharedPtr<FJso
 		}
 		Result->SetStringField(TEXT("collisionComplexity"), FlagName);
 	}
+
+// ─── #595 read_cloth_data ───────────────────────────────────────────
+// Read Chaos cloth data on a skeletal mesh: per clothing asset, its configs
+// (reflected UPROPERTYs), LOD count, and per-LOD point-weight-map summary
+// (name, target, vertex count, min/max) including the MaxDistances mask.
+TSharedPtr<FJsonValue> FAssetHandlers::ReadClothData(const TSharedPtr<FJsonObject>& Params)
+{
+	FString MeshPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("skeletalMeshPath"), TEXT("assetPath"), MeshPath)) return Err;
+	USkeletalMesh* Mesh = LoadAssetByPath<USkeletalMesh>(MeshPath);
+	if (!Mesh) return MCPError(FString::Printf(TEXT("SkeletalMesh not found: %s"), *MeshPath));
+
+	TArray<TSharedPtr<FJsonValue>> Assets;
+	for (UClothingAssetBase* Base : Mesh->GetMeshClothingAssets())
+	{
+		UClothingAssetCommon* Cloth = Cast<UClothingAssetCommon>(Base);
+		if (!Cloth) continue;
+
+		TSharedPtr<FJsonObject> AObj = MakeShared<FJsonObject>();
+		AObj->SetStringField(TEXT("name"), Cloth->GetName());
+
+		// Configs (each a UClothConfigBase subclass) - dump editable UPROPERTYs.
+		TSharedPtr<FJsonObject> Configs = MakeShared<FJsonObject>();
+		for (const TPair<FName, TObjectPtr<UClothConfigBase>>& CfgPair : Cloth->ClothConfigs)
+		{
+			UClothConfigBase* Cfg = CfgPair.Value;
+			if (!Cfg) continue;
+			TSharedPtr<FJsonObject> Props = MakeShared<FJsonObject>();
+			for (TFieldIterator<FProperty> It(Cfg->GetClass()); It; ++It)
+			{
+				FProperty* Prop = *It;
+				if (!Prop->HasAnyPropertyFlags(CPF_Edit)) continue;
+				FString ValueStr;
+				Prop->ExportTextItem_Direct(ValueStr, Prop->ContainerPtrToValuePtr<void>(Cfg), nullptr, Cfg, PPF_None);
+				Props->SetStringField(Prop->GetName(), ValueStr);
+			}
+			Configs->SetObjectField(CfgPair.Key.ToString(), Props);
+		}
+		AObj->SetObjectField(TEXT("configs"), Configs);
+
+		// LOD data + point weight maps (MaxDistances etc.).
+		TArray<TSharedPtr<FJsonValue>> Lods;
+		for (int32 LodIdx = 0; LodIdx < Cloth->LodData.Num(); ++LodIdx)
+		{
+			const FClothLODDataCommon& Lod = Cloth->LodData[LodIdx];
+			TSharedPtr<FJsonObject> LObj = MakeShared<FJsonObject>();
+			LObj->SetNumberField(TEXT("lod"), LodIdx);
+			LObj->SetNumberField(TEXT("numVertices"), Lod.PhysicalMeshData.Vertices.Num());
+
+			TArray<TSharedPtr<FJsonValue>> Masks;
+			for (const FPointWeightMap& Map : Lod.PointWeightMaps)
+			{
+				TSharedPtr<FJsonObject> MObj = MakeShared<FJsonObject>();
+				MObj->SetStringField(TEXT("name"), Map.Name.ToString());
+				MObj->SetNumberField(TEXT("target"), Map.CurrentTarget);
+				MObj->SetNumberField(TEXT("valueCount"), Map.Values.Num());
+				float MinV = TNumericLimits<float>::Max(), MaxV = -TNumericLimits<float>::Max();
+				for (float V : Map.Values) { MinV = FMath::Min(MinV, V); MaxV = FMath::Max(MaxV, V); }
+				if (Map.Values.Num() > 0) { MObj->SetNumberField(TEXT("min"), MinV); MObj->SetNumberField(TEXT("max"), MaxV); }
+				Masks.Add(MakeShared<FJsonValueObject>(MObj));
+			}
+			LObj->SetArrayField(TEXT("pointWeightMaps"), Masks);
+			Lods.Add(MakeShared<FJsonValueObject>(LObj));
+		}
+		AObj->SetArrayField(TEXT("lods"), Lods);
+		Assets.Add(MakeShared<FJsonValueObject>(AObj));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("skeletalMesh"), Mesh->GetPathName());
+	Result->SetNumberField(TEXT("clothingAssetCount"), Assets.Num());
+	Result->SetArrayField(TEXT("clothingAssets"), Assets);
+	return MCPResult(Result);
+}
+
+// ─── #595 set_cloth_config ──────────────────────────────────────────
+// Set UPROPERTYs on a clothing asset's config object via reflection.
+TSharedPtr<FJsonValue> FAssetHandlers::SetClothConfig(const TSharedPtr<FJsonObject>& Params)
+{
+	FString MeshPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("skeletalMeshPath"), TEXT("assetPath"), MeshPath)) return Err;
+	USkeletalMesh* Mesh = LoadAssetByPath<USkeletalMesh>(MeshPath);
+	if (!Mesh) return MCPError(FString::Printf(TEXT("SkeletalMesh not found: %s"), *MeshPath));
+
+	const FString ClothName = OptionalString(Params, TEXT("clothingAsset"));
+	const FString ConfigType = OptionalString(Params, TEXT("configType"));
+	const TSharedPtr<FJsonObject>* PropsObj = nullptr;
+	if (!Params->TryGetObjectField(TEXT("properties"), PropsObj) || !PropsObj)
+	{
+		return MCPError(TEXT("Missing 'properties' object"));
+	}
+
+	int32 Applied = 0;
+	TArray<TSharedPtr<FJsonValue>> Modified;
+	for (UClothingAssetBase* Base : Mesh->GetMeshClothingAssets())
+	{
+		UClothingAssetCommon* Cloth = Cast<UClothingAssetCommon>(Base);
+		if (!Cloth) continue;
+		if (!ClothName.IsEmpty() && Cloth->GetName() != ClothName) continue;
+		for (const TPair<FName, TObjectPtr<UClothConfigBase>>& CfgPair : Cloth->ClothConfigs)
+		{
+			UClothConfigBase* Cfg = CfgPair.Value;
+			if (!Cfg) continue;
+			if (!ConfigType.IsEmpty() && !CfgPair.Key.ToString().Contains(ConfigType) && !Cfg->GetClass()->GetName().Contains(ConfigType)) continue;
+			Cfg->Modify();
+			for (const auto& Pair : (*PropsObj)->Values)
+			{
+				FProperty* Prop = Cfg->GetClass()->FindPropertyByName(FName(*Pair.Key));
+				if (!Prop) continue;
+				FString ValueStr;
+				if (Pair.Value->Type == EJson::String) ValueStr = Pair.Value->AsString();
+				else if (Pair.Value->Type == EJson::Number) ValueStr = FString::SanitizeFloat(Pair.Value->AsNumber());
+				else if (Pair.Value->Type == EJson::Boolean) ValueStr = Pair.Value->AsBool() ? TEXT("true") : TEXT("false");
+				else continue;
+				Prop->ImportText_Direct(*ValueStr, Prop->ContainerPtrToValuePtr<void>(Cfg), Cfg, PPF_None);
+				Modified.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("%s.%s"), *CfgPair.Key.ToString(), *Pair.Key)));
+				++Applied;
+			}
+			Cfg->PostEditChange();
+		}
+	}
+	if (Applied == 0) return MCPError(TEXT("No matching cloth config / properties applied (check clothingAsset/configType/property names)"));
+
+	SaveAssetPackage(Mesh);
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("skeletalMesh"), Mesh->GetPathName());
+	Result->SetNumberField(TEXT("applied"), Applied);
+	Result->SetArrayField(TEXT("modified"), Modified);
 	return MCPResult(Result);
 }

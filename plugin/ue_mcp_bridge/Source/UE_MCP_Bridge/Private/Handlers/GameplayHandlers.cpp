@@ -4,6 +4,15 @@
 #include "HandlerJsonProperty.h"
 #include "HandlerAssetCreate.h"
 #include "EditorScriptingUtilities/Public/EditorAssetLibrary.h"
+#include "Modules/ModuleManager.h"
+#include "StateTree.h"
+#include "StateTreeReference.h"
+#include "StateTreeInstanceData.h"
+#include "StateTreeExecutionContext.h"
+#include "StateTreeEditorData.h"
+#include "StateTreeSchema.h"
+#include "StateTreeEditingSubsystem.h"
+#include "StateTreeCompilerLog.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -108,6 +117,7 @@ void FGameplayHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("create_behavior_tree"), &CreateBehaviorTree);
 	Registry.RegisterHandler(TEXT("create_eqs_query"), &CreateEqsQuery);
 	Registry.RegisterHandler(TEXT("create_state_tree"), &CreateStateTree);
+	Registry.RegisterHandler(TEXT("get_state_tree_runtime"), &GetStateTreeRuntime);
 	Registry.RegisterHandler(TEXT("create_game_mode"), &CreateGameMode);
 	Registry.RegisterHandler(TEXT("create_game_state"), &CreateGameState);
 	Registry.RegisterHandler(TEXT("create_player_controller"), &CreatePlayerController);
@@ -787,14 +797,140 @@ TSharedPtr<FJsonValue> FGameplayHandlers::CreateStateTree(const TSharedPtr<FJson
 	auto Created = MCPCreateAssetIdempotent<UObject>(Name, PackagePath, OnConflict, TEXT("StateTree"), STClass, nullptr);
 	if (Created.EarlyReturn) return Created.EarlyReturn;
 
-	UEditorAssetLibrary::SaveAsset(Created.Asset->GetPathName());
+	// #653/#681: a bare UStateTree has no EditorData, so every statetree(*)
+	// authoring action failed with "EditorData not found" and nothing could be
+	// persisted. Mirror UStateTreeFactory: attach a UStateTreeEditorData with a
+	// concrete schema and a root state, then compile - so states/tasks are
+	// authorable AND serialize with the asset (survive save/load).
+	UStateTree* StateTree = Cast<UStateTree>(Created.Asset);
+	if (!StateTree)
+	{
+		return MCPError(TEXT("Created asset is not a UStateTree"));
+	}
+
+	if (StateTree->EditorData == nullptr)
+	{
+		// Resolve the schema class (default: actor-component schema). Resolved by
+		// path so no hard GameplayStateTreeModule build dependency is needed.
+		const FString SchemaName = OptionalString(Params, TEXT("schema"),
+			TEXT("/Script/GameplayStateTreeModule.StateTreeComponentSchema"));
+		// The standard actor-component schema lives in GameplayStateTreeModule,
+		// which is not loaded until something uses a StateTreeComponent. Force it
+		// (and the AI variant) so the schema class registers.
+		FModuleManager::Get().LoadModule(TEXT("GameplayStateTreeModule"));
+		UClass* SchemaClass = LoadClass<UStateTreeSchema>(nullptr, *SchemaName);
+		if (!SchemaClass) SchemaClass = FindObject<UClass>(nullptr, *SchemaName);
+		if (!SchemaClass) SchemaClass = FindFirstObjectSafe<UClass>(*SchemaName);
+		if (!SchemaClass)
+		{
+			// Fall back to any concrete, non-abstract StateTreeSchema subclass so
+			// authoring still works even if the named schema is unavailable.
+			for (TObjectIterator<UClass> It; It; ++It)
+			{
+				if (It->IsChildOf(UStateTreeSchema::StaticClass()) &&
+					*It != UStateTreeSchema::StaticClass() &&
+					!It->HasAnyClassFlags(CLASS_Abstract) &&
+					!It->GetName().Contains(TEXT("Test")))
+				{
+					SchemaClass = *It;
+					break;
+				}
+			}
+		}
+		if (!SchemaClass)
+		{
+			return MCPError(FString::Printf(
+				TEXT("StateTree schema class not found: %s (pass 'schema' as a /Script/<Module>.<SchemaClass> path)"), *SchemaName));
+		}
+
+		UStateTreeEditorData* EditorData = NewObject<UStateTreeEditorData>(
+			StateTree, UStateTreeEditorData::StaticClass(), FName(), RF_Transactional);
+		StateTree->EditorData = EditorData;
+		EditorData->Schema = NewObject<UStateTreeSchema>(EditorData, SchemaClass, FName(), RF_Transactional);
+		EditorData->AddRootState();
+
+		FStateTreeCompilerLog Log;
+		UStateTreeEditingSubsystem::CompileStateTree(StateTree, Log);
+		StateTree->MarkPackageDirty();
+	}
+
+	SaveAssetPackage(StateTree);
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), Created.Asset->GetPathName());
+	Result->SetStringField(TEXT("path"), StateTree->GetPathName());
 	Result->SetStringField(TEXT("name"), Name);
-	MCPSetDeleteAssetRollback(Result, Created.Asset->GetPathName());
+	if (UStateTreeEditorData* ED = Cast<UStateTreeEditorData>(StateTree->EditorData))
+	{
+		if (ED->Schema) Result->SetStringField(TEXT("schema"), ED->Schema->GetClass()->GetPathName());
+	}
+	MCPSetDeleteAssetRollback(Result, StateTree->GetPathName());
 
+	return MCPResult(Result);
+}
+
+// #654: read the active state names of a running StateTreeComponent in PIE.
+// The component (UStateTreeComponent / UStateTreeAIComponent) keeps its runtime
+// data in an FStateTreeInstanceData 'InstanceData' member and its asset in a
+// 'StateTreeRef' FStateTreeReference. Access both via reflection (no hard
+// GameplayStateTreeModule dependency) and build an execution context to read
+// the active states.
+TSharedPtr<FJsonValue> FGameplayHandlers::GetStateTreeRuntime(const TSharedPtr<FJsonObject>& Params)
+{
+	FString ActorLabel;
+	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("pie"));
+	UWorld* World = ResolveWorldScope(WorldScope);
+	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
+
+	AActor* Actor = FindActorByLabelNameOrPath(World, ActorLabel);
+	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+
+	// Find a component that carries StateTree runtime data (by having an
+	// InstanceData property of type FStateTreeInstanceData + a StateTreeRef).
+	UActorComponent* STComp = nullptr;
+	FStructProperty* InstanceProp = nullptr;
+	FStructProperty* RefProp = nullptr;
+	const FString CompName = OptionalString(Params, TEXT("componentName"));
+	for (UActorComponent* Comp : Actor->GetComponents())
+	{
+		if (!Comp) continue;
+		if (!CompName.IsEmpty() && Comp->GetName() != CompName) continue;
+		FStructProperty* IP = CastField<FStructProperty>(Comp->GetClass()->FindPropertyByName(TEXT("InstanceData")));
+		FStructProperty* RP = CastField<FStructProperty>(Comp->GetClass()->FindPropertyByName(TEXT("StateTreeRef")));
+		if (IP && IP->Struct == FStateTreeInstanceData::StaticStruct() &&
+			RP && RP->Struct == FStateTreeReference::StaticStruct())
+		{
+			STComp = Comp; InstanceProp = IP; RefProp = RP; break;
+		}
+	}
+	if (!STComp) return MCPError(FString::Printf(TEXT("No StateTree component found on '%s'"), *ActorLabel));
+
+	FStateTreeReference* Ref = RefProp->ContainerPtrToValuePtr<FStateTreeReference>(STComp);
+	const UStateTree* StateTree = Ref ? Ref->GetStateTree() : nullptr;
+	FStateTreeInstanceData* InstanceData = InstanceProp->ContainerPtrToValuePtr<FStateTreeInstanceData>(STComp);
+	if (!StateTree || !InstanceData) return MCPError(TEXT("StateTree asset or instance data unavailable"));
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("actorLabel"), Actor->GetActorLabel());
+	Result->SetStringField(TEXT("component"), STComp->GetName());
+	Result->SetStringField(TEXT("stateTree"), StateTree->GetPathName());
+
+	if (InstanceData->Num() == 0)
+	{
+		Result->SetBoolField(TEXT("running"), false);
+		Result->SetStringField(TEXT("note"), TEXT("StateTree instance data not initialized (component not running yet). Start PIE / the component's logic first."));
+		return MCPResult(Result);
+	}
+
+	FStateTreeExecutionContext Context(*STComp, *StateTree, *InstanceData);
+	const TArray<FName> ActiveNames = Context.GetActiveStateNames();
+	TArray<TSharedPtr<FJsonValue>> Names;
+	for (const FName& N : ActiveNames) Names.Add(MakeShared<FJsonValueString>(N.ToString()));
+
+	Result->SetBoolField(TEXT("running"), true);
+	Result->SetStringField(TEXT("activeState"), Context.GetActiveStateName());
+	Result->SetArrayField(TEXT("activeStates"), Names);
 	return MCPResult(Result);
 }
 
@@ -1689,7 +1825,7 @@ TSharedPtr<FJsonValue> FGameplayHandlers::ConfigureAiPerceptionSense(const TShar
 			FString PErr;
 			if (MCPJsonProperty::SetJsonOnProperty(P, P->ContainerPtrToValuePtr<void>(Cfg), KV.Value, PErr))
 			{
-				AppliedProps.Add(KV.Key);
+				AppliedProps.Add(FString(*KV.Key));
 			}
 		}
 	}
@@ -1938,13 +2074,13 @@ TSharedPtr<FJsonValue> FGameplayHandlers::GetNavmeshDetails(const TSharedPtr<FJs
 		if (RecastNav) break;
 	}
 
-	// Fallback: iterate world actors
+	// Fallback: grab the first ARecastNavMesh in the world
 	if (!RecastNav)
 	{
-		for (TActorIterator<ARecastNavMesh> It(World); It; ++It)
+		TActorIterator<ARecastNavMesh> It(World);
+		if (It)
 		{
 			RecastNav = *It;
-			break;
 		}
 	}
 

@@ -27,6 +27,7 @@ import { networkingTool } from "./tools/networking.js";
 import { demoTool } from "./tools/demo.js";
 import { feedbackTool } from "./tools/feedback.js";
 import { statetreeTool } from "./tools/statetree.js";
+import { chooserTool } from "./tools/chooser.js";
 import { pluginsTool } from "./tools/plugins.js";
 // Project Intelligence layer (indexing / retrieval / graph / memory / context /
 // image / validation). These are local-handler tools: they run in the server
@@ -38,6 +39,8 @@ import { memoryTool } from "./tools/memory_tool.js";
 import { contextTool } from "./tools/context_tool.js";
 import { imageTool } from "./tools/image_tool.js";
 import { validateTool } from "./tools/validate_tool.js";
+import { epicTool } from "./tools/epic.js";
+import { fabTool } from "./tools/fab.js";
 
 export const ALL_TOOLS: ToolDef[] = [
   projectTool,
@@ -60,6 +63,7 @@ export const ALL_TOOLS: ToolDef[] = [
   demoTool,
   feedbackTool,
   statetreeTool,
+  chooserTool,
   pluginsTool,
   indexTool,
   searchTool,
@@ -68,6 +72,8 @@ export const ALL_TOOLS: ToolDef[] = [
   contextTool,
   imageTool,
   validateTool,
+  epicTool,
+  fabTool,
 ];
 
 /** Flatten to (toolName, actionName, bridgeMethod) triples for every action

@@ -8,6 +8,7 @@
 #include "HandlerUtils.h"
 #include "HandlerJsonProperty.h"
 #include "JsonSerializer.h"
+#include "Containers/Ticker.h"
 #include "Editor.h"
 #include "Editor/EditorEngine.h"
 #include "Engine/World.h"
@@ -861,10 +862,13 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 		if (!World) return MCPError(TEXT("No editor world available"));
 	}
 
-	AActor* Target = FindActorByLabel(World, ActorLabel);
+	// #654: also match internal UObject name and full path so unlabeled actors
+	// (e.g. AI controllers spawned at runtime, which have no editor label) can
+	// be targeted, not just editor-labelled placed actors.
+	AActor* Target = FindActorByLabelNameOrPath(World, ActorLabel);
 	if (!Target)
 	{
-		return MCPError(FString::Printf(TEXT("Actor not found in %s world: %s"), WorldScope == TEXT("pie") ? TEXT("PIE") : TEXT("editor"), *ActorLabel));
+		return MCPError(FString::Printf(TEXT("Actor not found in %s world (matched by label, name, or path): %s"), WorldScope == TEXT("pie") ? TEXT("PIE") : TEXT("editor"), *ActorLabel));
 	}
 
 	// #382: optional `component` redirects the call target to a named subobject
@@ -1259,9 +1263,22 @@ TSharedPtr<FJsonValue> FEditorHandlers::ConfigurePie(const TSharedPtr<FJsonObjec
 		bAny = true;
 	}
 
+	// #671: Play-in-New-Window resolution.
+	int32 WinW = 0, WinH = 0;
+	if (Params->TryGetNumberField(TEXT("newWindowWidth"), WinW) && WinW > 0)
+	{
+		SetIntPropOn(Settings, TEXT("NewWindowWidth"), WinW);
+		bAny = true;
+	}
+	if (Params->TryGetNumberField(TEXT("newWindowHeight"), WinH) && WinH > 0)
+	{
+		SetIntPropOn(Settings, TEXT("NewWindowHeight"), WinH);
+		bAny = true;
+	}
+
 	if (!bAny)
 	{
-		return MCPError(TEXT("Nothing to configure - provide numClients / netMode / runUnderOneProcess / launchSeparateServer"));
+		return MCPError(TEXT("Nothing to configure - provide numClients / netMode / runUnderOneProcess / launchSeparateServer / newWindowWidth / newWindowHeight"));
 	}
 
 	Settings->SaveConfig();
@@ -1272,6 +1289,123 @@ TSharedPtr<FJsonValue> FEditorHandlers::ConfigurePie(const TSharedPtr<FJsonObjec
 	Result->SetStringField(TEXT("netMode"), NetModeNameFromValue(GetEnumPropOn(Settings, TEXT("PlayNetMode"))));
 	Result->SetBoolField(TEXT("runUnderOneProcess"), GetBoolPropOn(Settings, TEXT("RunUnderOneProcess"), true));
 	Result->SetBoolField(TEXT("launchSeparateServer"), GetBoolPropOn(Settings, TEXT("bLaunchSeparateServer"), false));
+	Result->SetNumberField(TEXT("newWindowWidth"), GetIntPropOn(Settings, TEXT("NewWindowWidth"), 0));
+	Result->SetNumberField(TEXT("newWindowHeight"), GetIntPropOn(Settings, TEXT("NewWindowHeight"), 0));
+	return MCPResult(Result);
+}
+
+// #671: point the PIE player's view (control rotation) at a pitch/yaw so a
+// capture frames the intended direction without manual mouse-look.
+TSharedPtr<FJsonValue> FEditorHandlers::PieSetPlayerView(const TSharedPtr<FJsonObject>& Params)
+{
+	FWorldContext* PieCtx = GEditor ? GEditor->GetPIEWorldContext() : nullptr;
+	UWorld* World = PieCtx ? PieCtx->World() : nullptr;
+	if (!World) return MCPError(TEXT("PIE not running"));
+	APlayerController* PC = World->GetFirstPlayerController();
+	if (!PC) return MCPError(TEXT("No PIE player controller"));
+
+	FRotator Rot = PC->GetControlRotation();
+	double Tmp;
+	if (Params->TryGetNumberField(TEXT("pitch"), Tmp)) Rot.Pitch = Tmp;
+	if (Params->TryGetNumberField(TEXT("yaw"), Tmp))   Rot.Yaw = Tmp;
+	if (Params->TryGetNumberField(TEXT("roll"), Tmp))  Rot.Roll = Tmp;
+	PC->SetControlRotation(Rot);
+
+	auto Result = MCPSuccess();
+	Result->SetObjectField(TEXT("controlRotation"), MCPRotatorToJsonObject(Rot));
+	return MCPResult(Result);
+}
+
+// #671: stage input for the running game (Game-only input mode + focus the
+// game viewport) so injected/simulated input reaches the pawn.
+TSharedPtr<FJsonValue> FEditorHandlers::StageGameInput(const TSharedPtr<FJsonObject>& Params)
+{
+	FWorldContext* PieCtx = GEditor ? GEditor->GetPIEWorldContext() : nullptr;
+	UWorld* World = PieCtx ? PieCtx->World() : nullptr;
+	if (!World) return MCPError(TEXT("PIE not running"));
+	APlayerController* PC = World->GetFirstPlayerController();
+	if (!PC) return MCPError(TEXT("No PIE player controller"));
+
+	const FString Mode = OptionalString(Params, TEXT("inputMode"), TEXT("gameOnly")).ToLower();
+	if (Mode == TEXT("uionly"))
+	{
+		FInputModeUIOnly M;
+		PC->SetInputMode(M);
+	}
+	else if (Mode == TEXT("gameandui"))
+	{
+		FInputModeGameAndUI M;
+		PC->SetInputMode(M);
+	}
+	else
+	{
+		FInputModeGameOnly M;
+		PC->SetInputMode(M);
+	}
+	const bool bShowCursor = OptionalBool(Params, TEXT("showMouseCursor"), Mode != TEXT("gameonly"));
+	PC->SetShowMouseCursor(bShowCursor);
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("inputMode"), Mode);
+	Result->SetBoolField(TEXT("showMouseCursor"), bShowCursor);
+	return MCPResult(Result);
+}
+
+// #583: fire a parameterless UFUNCTION on an actor repeatedly at an interval
+// for sustained on-demand triggering (human visual verification). Returns
+// immediately; a game-thread ticker drives the remaining calls in the
+// background and unregisters itself when the count is exhausted or the actor
+// goes away.
+TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunctionRepeating(const TSharedPtr<FJsonObject>& Params)
+{
+	FString FunctionName;
+	if (auto Err = RequireString(Params, TEXT("functionName"), FunctionName)) return Err;
+	FString ActorLabel;
+	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+
+	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("auto")).ToLower();
+	UWorld* World = ResolveWorldScope(WorldScope);
+	if (!World) return MCPError(TEXT("World not available"));
+
+	AActor* Target = FindActorByLabelNameOrPath(World, ActorLabel);
+	if (!Target) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+
+	UFunction* Func = Target->FindFunction(FName(*FunctionName));
+	if (!Func) return MCPError(FString::Printf(TEXT("Function '%s' not found on '%s'"), *FunctionName, *Target->GetClass()->GetName()));
+	if (Func->NumParms != 0) return MCPError(FString::Printf(TEXT("Function '%s' takes parameters; only parameterless functions are supported for repeating invoke"), *FunctionName));
+
+	const double Interval = FMath::Max(0.05, OptionalNumber(Params, TEXT("intervalSeconds"), 1.0));
+	const int32 Count = FMath::Clamp(OptionalInt(Params, TEXT("count"), 5), 1, 10000);
+
+	// Fire once immediately, then schedule the rest.
+	Target->ProcessEvent(Func, nullptr);
+	int32 Remaining = Count - 1;
+
+	if (Remaining > 0)
+	{
+		TWeakObjectPtr<AActor> WeakActor(Target);
+		const FString FnName = FunctionName;
+		TSharedRef<int32> RemainingRef = MakeShared<int32>(Remaining);
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
+			[WeakActor, FnName, RemainingRef](float) -> bool
+			{
+				AActor* A = WeakActor.Get();
+				if (!A) return false; // actor gone -> stop
+				if (UFunction* F = A->FindFunction(FName(*FnName)))
+				{
+					A->ProcessEvent(F, nullptr);
+				}
+				(*RemainingRef)--;
+				return (*RemainingRef) > 0; // continue until exhausted
+			}), (float)Interval);
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("actorLabel"), Target->GetActorLabel());
+	Result->SetStringField(TEXT("functionName"), FunctionName);
+	Result->SetNumberField(TEXT("count"), Count);
+	Result->SetNumberField(TEXT("intervalSeconds"), Interval);
+	Result->SetStringField(TEXT("note"), TEXT("Fired once now; remaining calls run in the background at the interval."));
 	return MCPResult(Result);
 }
 

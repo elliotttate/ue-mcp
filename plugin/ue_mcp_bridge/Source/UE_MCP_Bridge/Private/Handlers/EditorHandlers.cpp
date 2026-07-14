@@ -24,6 +24,10 @@
 #include "Misc/FileHelper.h"
 #include "LevelEditorViewport.h"
 #include "UnrealClient.h"
+#include "ContentStreaming.h"
+#include "RenderingThread.h"
+#include "Misc/AutomationTest.h"
+#include "HAL/PlatformProcess.h"
 #include "Slate/SceneViewport.h"
 #include "HAL/PlatformMemory.h"
 #include "Misc/App.h"
@@ -187,6 +191,8 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("list_crashes"), &ListCrashes);
 	Registry.RegisterHandler(TEXT("get_crash_info"), &GetCrashInfo);
 	Registry.RegisterHandler(TEXT("check_for_crashes"), &CheckForCrashes);
+	// #693: headless automation test runner.
+	Registry.RegisterHandlerWithTimeout(TEXT("run_automation_tests"), &RunAutomationTests, 300.0f);
 	// #14: Build project
 	Registry.RegisterHandler(TEXT("build_project"), &BuildProject);
 	// #49: Generate project files
@@ -200,6 +206,9 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("invoke_static_function"), &InvokeStaticFunction);
 	Registry.RegisterHandler(TEXT("configure_pie"), &ConfigurePie);
 	Registry.RegisterHandler(TEXT("get_pie_config"), &GetPieConfig);
+	Registry.RegisterHandler(TEXT("pie_set_player_view"), &PieSetPlayerView);
+	Registry.RegisterHandler(TEXT("stage_game_input"), &StageGameInput);
+	Registry.RegisterHandler(TEXT("invoke_function_repeating"), &InvokeFunctionRepeating);
 	// #455: discover UBlueprintFunctionLibrary classes (GeometryScript,
 	// Kismet, anything user-defined). Pair with editor.invoke_function to
 	// drive GeometryScript ops from MCP without hand-writing each handler.
@@ -398,7 +407,14 @@ TSharedPtr<FJsonValue> FEditorHandlers::SetProperty(const TSharedPtr<FJsonObject
 	FPropertyChangedEvent ChangeEvent(Property);
 	(LeafOwner ? LeafOwner : Asset)->PostEditChangeProperty(ChangeEvent);
 	Asset->MarkPackageDirty();
-	UEditorAssetLibrary::SaveLoadedAsset(Asset, /*bOnlyIfIsDirty=*/true);
+	// #674: opt out of the immediate disk save. Default true preserves the
+	// prior behavior; pass save=false to leave the package dirty in-memory
+	// (batch many writes, then save_dirty / save_asset once).
+	const bool bSave = OptionalBool(Params, TEXT("save"), true);
+	if (bSave)
+	{
+		UEditorAssetLibrary::SaveLoadedAsset(Asset, /*bOnlyIfIsDirty=*/true);
+	}
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
@@ -406,6 +422,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::SetProperty(const TSharedPtr<FJsonObject
 	Result->SetStringField(TEXT("resolvedKind"), ResolvedKind);
 	Result->SetStringField(TEXT("propertyName"), PropertyName);
 	Result->SetStringField(TEXT("type"), Property->GetCPPType());
+	Result->SetBoolField(TEXT("saved"), bSave);
 	return MCPResult(Result);
 }
 
@@ -1573,17 +1590,18 @@ TSharedPtr<FJsonValue> FEditorHandlers::SetCVars(const TSharedPtr<FJsonObject>& 
 	{
 		for (const auto& Pair : (*CVarObj)->Values)
 		{
+			const FString CVarName(*Pair.Key);
 			FString ValStr;
 			if (Pair.Value.IsValid() && Pair.Value->TryGetString(ValStr))
 			{
-				Requests.Add({ Pair.Key, ValStr });
+				Requests.Add({ CVarName, ValStr });
 			}
 			else if (Pair.Value.IsValid())
 			{
 				// numbers/bools arrive as non-string JSON; stringify them.
 				double Num = 0.0; bool bBool = false;
-				if (Pair.Value->TryGetNumber(Num)) Requests.Add({ Pair.Key, FString::SanitizeFloat(Num) });
-				else if (Pair.Value->TryGetBool(bBool)) Requests.Add({ Pair.Key, bBool ? TEXT("1") : TEXT("0") });
+				if (Pair.Value->TryGetNumber(Num)) Requests.Add({ CVarName, FString::SanitizeFloat(Num) });
+				else if (Pair.Value->TryGetBool(bBool)) Requests.Add({ CVarName, bBool ? TEXT("1") : TEXT("0") });
 			}
 		}
 	}
@@ -1910,7 +1928,11 @@ TSharedPtr<FJsonValue> FEditorHandlers::CheckForCrashes(const TSharedPtr<FJsonOb
 }
 TSharedPtr<FJsonValue> FEditorHandlers::CaptureScenePng(const TSharedPtr<FJsonObject>& Params)
 {
-	REQUIRE_EDITOR_WORLD(World);
+	// #599: allow capturing the PIE world (not just the editor world) so a
+	// framed shot reflects the running game.
+	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
+	UWorld* World = ResolveWorldScope(WorldScope);
+	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
 
 	FString OutputPath;
 	if (auto Err = RequireString(Params, TEXT("outputPath"), OutputPath)) return Err;
@@ -1923,8 +1945,27 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScenePng(const TSharedPtr<FJsonOb
 
 	const double Fov = OptionalNumber(Params, TEXT("fov"), 90.0);
 
-	const FVector Location = OptionalVec3(Params, TEXT("location"));
-	const FRotator Rotation = OptionalRotator(Params, TEXT("rotation"));
+	FVector Location = OptionalVec3(Params, TEXT("location"));
+	FRotator Rotation = OptionalRotator(Params, TEXT("rotation"));
+
+	// #599: focusActorLabel frames the capture on a specific actor by computing
+	// a camera position from the actor's bounds and looking at its center.
+	const FString FocusLabel = OptionalString(Params, TEXT("focusActorLabel"));
+	if (!FocusLabel.IsEmpty())
+	{
+		AActor* Focus = FindActorByLabelNameOrPath(World, FocusLabel);
+		if (!Focus) return MCPError(FString::Printf(TEXT("focusActorLabel not found: %s"), *FocusLabel));
+		FVector Origin, Extent;
+		Focus->GetActorBounds(false, Origin, Extent);
+		const double Radius = FMath::Max(Extent.Size(), 50.0);
+		// Distance so the bounds fill the frame at the given FOV, with margin.
+		const double Distance = (Radius / FMath::Tan(FMath::DegreesToRadians(Fov * 0.5))) * OptionalNumber(Params, TEXT("focusMargin"), 1.5);
+		// Default framing direction (front-ish, slightly above); overridable.
+		FVector Dir = OptionalVec3(Params, TEXT("focusDirection"), FVector(-1.0, -1.0, 0.6));
+		if (!Dir.Normalize()) Dir = FVector(-1, -1, 0.6).GetSafeNormal();
+		Location = Origin + Dir * Distance;
+		Rotation = (Origin - Location).Rotation();
+	}
 
 	// Find or spawn the reusable capture actor.
 	static const FString CaptureLabel = TEXT("__ClaudeSceneCapture");
@@ -1961,7 +2002,20 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScenePng(const TSharedPtr<FJsonOb
 	if (!RT) return MCPError(TEXT("Failed to create RenderTarget2D"));
 	Comp->TextureTarget = RT;
 
+	// #662: force-stream all textures to full resolution and flush the render
+	// thread so the capture is a complete, resident frame rather than the
+	// unloaded-texture checker or a stale cached image. Double-capture ensures
+	// streamed mips that arrive after the first pass are present in the second.
+	const bool bFullyLoadTextures = OptionalBool(Params, TEXT("fullyLoadTextures"), true);
+	if (bFullyLoadTextures)
+	{
+		IStreamingManager::Get().StreamAllResources(0.0f);
+		FlushRenderingCommands();
+		Comp->CaptureScene();
+		FlushRenderingCommands();
+	}
 	Comp->CaptureScene();
+	FlushRenderingCommands();
 
 	// Split outputPath into directory + filename for ExportRenderTarget.
 	FString AbsPath = OutputPath;
@@ -2048,5 +2102,80 @@ TSharedPtr<FJsonValue> FEditorHandlers::ListFunctionLibraries(const TSharedPtr<F
 	Result->SetArrayField(TEXT("libraries"), Libraries);
 	Result->SetNumberField(TEXT("count"), Libraries.Num());
 	if (!Pattern.IsEmpty()) Result->SetStringField(TEXT("pattern"), Pattern);
+	return MCPResult(Result);
+}
+
+// ─── #693 run_automation_tests ──────────────────────────────────────
+// Headlessly run registered Automation tests whose name matches a filter and
+// report pass/fail + errors. Uses FAutomationTestFramework's synchronous
+// StartTestByName/StopTest, which fully runs non-latent tests. Latent tests
+// (that enqueue cross-frame commands) have their queued commands flushed on a
+// best-effort tick loop with a timeout.
+TSharedPtr<FJsonValue> FEditorHandlers::RunAutomationTests(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString NameFilter = OptionalString(Params, TEXT("filter"));
+	const int32 MaxTests = OptionalInt(Params, TEXT("maxTests"), 50);
+
+	FAutomationTestFramework& Framework = FAutomationTestFramework::Get();
+	Framework.SetRequestedTestFilter(EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter |
+		EAutomationTestFlags::SmokeFilter | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::ClientContext);
+
+	TArray<FAutomationTestInfo> AllTests;
+	Framework.GetValidTestNames(AllTests);
+
+	TArray<TSharedPtr<FJsonValue>> Results;
+	int32 Ran = 0, Passed = 0, Failed = 0;
+	for (const FAutomationTestInfo& Info : AllTests)
+	{
+		const FString TestName = Info.GetTestName();
+		const FString DisplayName = Info.GetDisplayName();
+		if (!NameFilter.IsEmpty() &&
+			!TestName.Contains(NameFilter) && !DisplayName.Contains(NameFilter))
+		{
+			continue;
+		}
+		if (Ran >= MaxTests) break;
+
+		Framework.StartTestByName(TestName, /*RoleIndex*/ 0);
+
+		// Flush latent commands (best effort, bounded) so latent tests finish.
+		int32 Guard = 0;
+		while (!Framework.ExecuteLatentCommands() && Guard++ < 1000)
+		{
+			FPlatformProcess::Sleep(0.0f);
+		}
+
+		FAutomationTestExecutionInfo ExecInfo;
+		const bool bPassed = Framework.StopTest(ExecInfo);
+		++Ran;
+		if (bPassed) ++Passed; else ++Failed;
+
+		TSharedPtr<FJsonObject> R = MakeShared<FJsonObject>();
+		R->SetStringField(TEXT("test"), DisplayName.IsEmpty() ? TestName : DisplayName);
+		R->SetBoolField(TEXT("passed"), bPassed);
+		R->SetNumberField(TEXT("errors"), ExecInfo.GetErrorTotal());
+		R->SetNumberField(TEXT("warnings"), ExecInfo.GetWarningTotal());
+		if (ExecInfo.GetErrorTotal() > 0)
+		{
+			TArray<TSharedPtr<FJsonValue>> ErrMsgs;
+			for (const FAutomationExecutionEntry& Entry : ExecInfo.GetEntries())
+			{
+				if (Entry.Event.Type == EAutomationEventType::Error)
+				{
+					ErrMsgs.Add(MakeShared<FJsonValueString>(Entry.Event.Message));
+				}
+			}
+			R->SetArrayField(TEXT("errorMessages"), ErrMsgs);
+		}
+		Results.Add(MakeShared<FJsonValueObject>(R));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("filter"), NameFilter);
+	Result->SetNumberField(TEXT("discovered"), AllTests.Num());
+	Result->SetNumberField(TEXT("ran"), Ran);
+	Result->SetNumberField(TEXT("passed"), Passed);
+	Result->SetNumberField(TEXT("failed"), Failed);
+	Result->SetArrayField(TEXT("results"), Results);
 	return MCPResult(Result);
 }

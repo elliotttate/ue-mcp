@@ -24,7 +24,13 @@
 #include "AnimationTransitionGraph.h"
 #include "AnimStateNode.h"
 #include "AnimStateTransitionNode.h"
+#include "AnimGraphNode_TransitionResult.h"
+#include "K2Node_VariableGet.h"
+#include "K2Node_CallFunction.h"
+#include "EdGraphSchema_K2.h"
+#include "Kismet/KismetMathLibrary.h"
 #include "RetargetEditor/IKRetargeterController.h"
+#include "RetargetEditor/IKRetargetBatchOperation.h"
 #include "Retargeter/IKRetargeter.h"
 #include "AnimGraphNode_SequencePlayer.h"
 #include "AnimGraphNode_BlendSpacePlayer.h"
@@ -35,9 +41,10 @@
 #include "PoseSearch/PoseSearchDerivedData.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Animation/AnimComposite.h"
+#include "Animation/AnimSequenceBase.h"
 #include "Animation/BlendSpace.h"
 #include "Animation/Skeleton.h"
-#include "InstancedStruct.h"
+#include "StructUtils/InstancedStruct.h"
 #include "UObject/Package.h"
 #include "Misc/PackageName.h"
 #include "Runtime/Launch/Resources/Version.h"
@@ -61,8 +68,77 @@ static int32 GetPoseSearchAnimationAssetCount(const UPoseSearchDatabase* Databas
 #endif
 }
 
-static bool AddPoseSearchAnimationAsset(UPoseSearchDatabase* Database, UObject* AnimAsset, FString& OutError)
+// Optional per-clip authoring flags (#684). Each is only applied when set, so a
+// caller can tune one flag without disturbing the rest.
+struct FPoseSearchClipFlags
 {
+	TOptional<bool> bEnabled;
+	TOptional<bool> bDisableReselection;
+	TOptional<EPoseSearchMirrorOption> MirrorOption;
+	TOptional<FFloatInterval> SamplingRange;
+};
+
+// Parse clip flags out of a JSON object (the handler Params for a single add, or
+// a per-entry object for the bulk setter). Recognises: enabled, disableReselection,
+// mirror ("original"|"mirrored"|"both"), sampleStart / sampleEnd (seconds).
+static FPoseSearchClipFlags ParsePoseSearchClipFlags(const TSharedPtr<FJsonObject>& Obj)
+{
+	FPoseSearchClipFlags Flags;
+	bool BoolVal = false;
+	if (Obj->TryGetBoolField(TEXT("enabled"), BoolVal)) Flags.bEnabled = BoolVal;
+	if (Obj->TryGetBoolField(TEXT("disableReselection"), BoolVal)) Flags.bDisableReselection = BoolVal;
+
+	FString Mirror;
+	if (Obj->TryGetStringField(TEXT("mirror"), Mirror))
+	{
+		if (Mirror.Equals(TEXT("mirrored"), ESearchCase::IgnoreCase))
+			Flags.MirrorOption = EPoseSearchMirrorOption::MirroredOnly;
+		else if (Mirror.Equals(TEXT("both"), ESearchCase::IgnoreCase))
+			Flags.MirrorOption = EPoseSearchMirrorOption::UnmirroredAndMirrored;
+		else
+			Flags.MirrorOption = EPoseSearchMirrorOption::UnmirroredOnly;
+	}
+
+	double SampleStart = 0.0, SampleEnd = 0.0;
+	const bool bHasStart = Obj->TryGetNumberField(TEXT("sampleStart"), SampleStart);
+	const bool bHasEnd = Obj->TryGetNumberField(TEXT("sampleEnd"), SampleEnd);
+	if (bHasStart || bHasEnd)
+	{
+		Flags.SamplingRange = FFloatInterval((float)SampleStart, (float)SampleEnd);
+	}
+	return Flags;
+}
+
+#if UE_MCP_HAS_POSESEARCH_DATABASE_ASSET_API
+static void ApplyPoseSearchClipFlags(FPoseSearchDatabaseAnimationAsset& Entry, const FPoseSearchClipFlags& Flags)
+{
+#if WITH_EDITORONLY_DATA
+	if (Flags.bEnabled.IsSet()) Entry.bEnabled = Flags.bEnabled.GetValue();
+	if (Flags.bDisableReselection.IsSet()) Entry.bDisableReselection = Flags.bDisableReselection.GetValue();
+	if (Flags.MirrorOption.IsSet()) Entry.MirrorOption = Flags.MirrorOption.GetValue();
+	if (Flags.SamplingRange.IsSet()) Entry.SamplingRange = Flags.SamplingRange.GetValue();
+#endif
+}
+#endif
+
+static bool AddPoseSearchAnimationAsset(UPoseSearchDatabase* Database, UObject* AnimAsset, const FPoseSearchClipFlags& Flags, FString& OutError)
+{
+	// PoseSearch accepts AnimSequence/Composite/Montage (all UAnimSequenceBase) and BlendSpace.
+	if (!AnimAsset->IsA<UAnimSequenceBase>() && !AnimAsset->IsA<UBlendSpace>())
+	{
+		OutError = FString::Printf(TEXT("Animation asset type not supported by PoseSearch: %s"), *AnimAsset->GetClass()->GetName());
+		return false;
+	}
+
+#if UE_MCP_HAS_POSESEARCH_DATABASE_ASSET_API
+	// UE 5.7+ unified every clip type into FPoseSearchDatabaseAnimationAsset,
+	// which holds any UObject anim asset directly.
+	FPoseSearchDatabaseAnimationAsset Entry;
+	Entry.AnimAsset = AnimAsset;
+	ApplyPoseSearchClipFlags(Entry, Flags);
+	Database->AddAnimationAsset(Entry);
+	return true;
+#else
 	FInstancedStruct NewEntry;
 	if (UAnimSequence* Sequence = Cast<UAnimSequence>(AnimAsset))
 	{
@@ -89,13 +165,9 @@ static bool AddPoseSearchAnimationAsset(UPoseSearchDatabase* Database, UObject* 
 		OutError = FString::Printf(TEXT("Animation asset type not supported by PoseSearch: %s"), *AnimAsset->GetClass()->GetName());
 		return false;
 	}
-
-#if UE_MCP_HAS_POSESEARCH_DATABASE_ASSET_API
-	Database->AddAnimationAsset(MoveTemp(NewEntry));
-#else
 	Database->AnimationAssets.Add(MoveTemp(NewEntry));
-#endif
 	return true;
+#endif
 }
 
 // ─── State Machine Helpers ────────────────────────────────────────
@@ -448,6 +520,18 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AddTransition(const TSharedPtr<FJsonO
 	Result->SetStringField(TEXT("stateMachineName"), SMName);
 	Result->SetStringField(TEXT("fromState"), FromState);
 	Result->SetStringField(TEXT("toState"), ToState);
+	// #630: expose the transition node's stable GUID so callers can address it
+	// by handle (from/to state names are ambiguous when multiple transitions
+	// share endpoints).
+	Result->SetStringField(TEXT("transitionGuid"), TransNode->NodeGuid.ToString());
+	// #630: expose the transition's rule graph name. The condition ("can enter
+	// transition") is authored in this bound graph - address it by name with the
+	// standard blueprint graph tools (add_node / connect_pins into the
+	// TransitionResult node's bCanEnterTransition pin) to set any condition.
+	if (TransNode->BoundGraph)
+	{
+		Result->SetStringField(TEXT("boundGraph"), TransNode->BoundGraph->GetName());
+	}
 	// No rollback: no paired remove_transition handler.
 
 	return MCPResult(Result);
@@ -632,6 +716,216 @@ TSharedPtr<FJsonValue> FAnimationHandlers::SetTransitionBlend(const TSharedPtr<F
 }
 
 
+// Locate a transition node in a state machine graph by transitionGuid (preferred,
+// unambiguous) or by fromState+toState endpoints. Returns nullptr if none match.
+static UAnimStateTransitionNode* FindTransitionNode(
+	UAnimationStateMachineGraph* SMGraph,
+	const FString& TransitionGuid,
+	const FString& FromState,
+	const FString& ToState)
+{
+	for (UEdGraphNode* Node : SMGraph->Nodes)
+	{
+		UAnimStateTransitionNode* T = Cast<UAnimStateTransitionNode>(Node);
+		if (!T) continue;
+
+		if (!TransitionGuid.IsEmpty())
+		{
+			if (T->NodeGuid.ToString() == TransitionGuid) return T;
+			continue;
+		}
+
+		UAnimStateNode* Prev = Cast<UAnimStateNode>(T->GetPreviousState());
+		UAnimStateNode* Next = Cast<UAnimStateNode>(T->GetNextState());
+		if (Prev && Next && Prev->GetStateName() == FromState && Next->GetStateName() == ToState)
+		{
+			return T;
+		}
+	}
+	return nullptr;
+}
+
+// #707: author a transition's "can enter transition" condition from a bool
+// variable. Every transition's rule graph is named "Transition", so the generic
+// blueprint(read_graph/add_node/connect_pins) tools (which address by graphName)
+// can only ever reach the first one. This native setter addresses the transition
+// by transitionGuid or fromState+toState, then wires a bool VariableGet (optionally
+// negated) into the TransitionResult node's bCanEnterTransition pin.
+TSharedPtr<FJsonValue> FAnimationHandlers::SetTransitionCondition(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
+
+	FString SMName;
+	if (auto Err = RequireString(Params, TEXT("stateMachineName"), SMName)) return Err;
+
+	FString VariableName;
+	if (auto Err = RequireString(Params, TEXT("variableName"), VariableName)) return Err;
+
+	// Selector: transitionGuid is unambiguous; fromState+toState is the fallback.
+	const FString TransitionGuid = OptionalString(Params, TEXT("transitionGuid"), TEXT(""));
+	const FString FromState = OptionalString(Params, TEXT("fromState"), TEXT(""));
+	const FString ToState = OptionalString(Params, TEXT("toState"), TEXT(""));
+	if (TransitionGuid.IsEmpty() && (FromState.IsEmpty() || ToState.IsEmpty()))
+	{
+		return MCPError(TEXT("Provide transitionGuid, or both fromState and toState, to identify the transition."));
+	}
+
+	const bool bNegate = OptionalBool(Params, TEXT("negate"), false);
+
+	UAnimBlueprint* AnimBP = LoadAnimBP(AssetPath);
+	if (!AnimBP)
+	{
+		return MCPError(FString::Printf(TEXT("AnimBlueprint not found: %s"), *AssetPath));
+	}
+
+	UAnimGraphNode_StateMachine* SMNode = FindStateMachineNode(AnimBP, SMName);
+	if (!SMNode)
+	{
+		return MCPError(FString::Printf(TEXT("State machine '%s' not found"), *SMName));
+	}
+
+	UAnimationStateMachineGraph* SMGraph = Cast<UAnimationStateMachineGraph>(SMNode->EditorStateMachineGraph);
+	if (!SMGraph)
+	{
+		return MCPError(TEXT("State machine has no editor graph"));
+	}
+
+	UAnimStateTransitionNode* TransNode = FindTransitionNode(SMGraph, TransitionGuid, FromState, ToState);
+	if (!TransNode)
+	{
+		if (!TransitionGuid.IsEmpty())
+			return MCPError(FString::Printf(TEXT("No transition with transitionGuid '%s'"), *TransitionGuid));
+		return MCPError(FString::Printf(TEXT("No transition from '%s' to '%s'"), *FromState, *ToState));
+	}
+
+	// Validate the variable exists on the AnimBP and is a bool.
+	UClass* VarOwnerClass = AnimBP->SkeletonGeneratedClass ? AnimBP->SkeletonGeneratedClass : AnimBP->GeneratedClass;
+	if (VarOwnerClass && !CastField<FBoolProperty>(VarOwnerClass->FindPropertyByName(FName(*VariableName))))
+	{
+		return MCPError(FString::Printf(
+			TEXT("Variable '%s' not found on the AnimBlueprint or is not a bool. Create a bool variable first (blueprint(add_variable))."),
+			*VariableName));
+	}
+
+	UAnimationTransitionGraph* TransGraph = Cast<UAnimationTransitionGraph>(TransNode->BoundGraph);
+	if (!TransGraph)
+	{
+		return MCPError(TEXT("Transition has no rule graph (BoundGraph)."));
+	}
+	UAnimGraphNode_TransitionResult* ResultNode = TransGraph->GetResultNode();
+	if (!ResultNode)
+	{
+		return MCPError(TEXT("Transition rule graph has no result node."));
+	}
+
+	// The result node exposes the bool condition as an input data pin
+	// ("bCanEnterTransition"). Fall back to the first bool input pin.
+	UEdGraphPin* ResultPin = nullptr;
+	for (UEdGraphPin* Pin : ResultNode->Pins)
+	{
+		if (!Pin || Pin->Direction != EGPD_Input) continue;
+		if (Pin->PinName == TEXT("bCanEnterTransition")) { ResultPin = Pin; break; }
+		if (!ResultPin && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Boolean) ResultPin = Pin;
+	}
+	if (!ResultPin)
+	{
+		return MCPError(TEXT("Could not find the bCanEnterTransition pin on the transition result node."));
+	}
+
+	// Idempotency: wipe any previously authored condition nodes so re-running
+	// replaces the condition instead of stacking orphan nodes. The default rule
+	// graph contains only the result node; anything else was authored by us.
+	{
+		TArray<UEdGraphNode*> ToRemove;
+		for (UEdGraphNode* Node : TransGraph->Nodes)
+		{
+			if (Node && Node != ResultNode) ToRemove.Add(Node);
+		}
+		for (UEdGraphNode* Node : ToRemove)
+		{
+			TransGraph->RemoveNode(Node);
+		}
+	}
+	ResultPin->BreakAllPinLinks();
+
+	// Author: VariableGet(bool) -> [optional NOT] -> bCanEnterTransition.
+	UK2Node_VariableGet* GetNode = NewObject<UK2Node_VariableGet>(TransGraph);
+	TransGraph->AddNode(GetNode, false, false);
+	GetNode->VariableReference.SetSelfMember(FName(*VariableName));
+	GetNode->CreateNewGuid();
+	GetNode->PostPlacedNewNode();
+	GetNode->AllocateDefaultPins();
+	GetNode->NodePosX = ResultNode->NodePosX - 400;
+	GetNode->NodePosY = ResultNode->NodePosY;
+
+	UEdGraphPin* VarOutPin = nullptr;
+	for (UEdGraphPin* Pin : GetNode->Pins)
+	{
+		if (Pin && Pin->Direction == EGPD_Output && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Boolean)
+		{
+			VarOutPin = Pin;
+			break;
+		}
+	}
+	if (!VarOutPin)
+	{
+		TransGraph->RemoveNode(GetNode);
+		return MCPError(FString::Printf(
+			TEXT("VariableGet for '%s' produced no bool output pin - is the variable a bool?"), *VariableName));
+	}
+
+	UEdGraphPin* SourcePin = VarOutPin;
+	if (bNegate)
+	{
+		UFunction* NotFunc = UKismetMathLibrary::StaticClass()->FindFunctionByName(FName(TEXT("Not_PreBool")));
+		if (NotFunc)
+		{
+			UK2Node_CallFunction* NotNode = NewObject<UK2Node_CallFunction>(TransGraph);
+			TransGraph->AddNode(NotNode, false, false);
+			NotNode->SetFromFunction(NotFunc);
+			NotNode->CreateNewGuid();
+			NotNode->PostPlacedNewNode();
+			NotNode->AllocateDefaultPins();
+			NotNode->NodePosX = ResultNode->NodePosX - 200;
+			NotNode->NodePosY = ResultNode->NodePosY;
+
+			UEdGraphPin* NotIn = nullptr;
+			UEdGraphPin* NotOut = nullptr;
+			for (UEdGraphPin* Pin : NotNode->Pins)
+			{
+				if (!Pin || Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Boolean) continue;
+				if (Pin->Direction == EGPD_Input) NotIn = Pin;
+				else if (Pin->Direction == EGPD_Output) NotOut = Pin;
+			}
+			if (NotIn && NotOut)
+			{
+				VarOutPin->MakeLinkTo(NotIn);
+				SourcePin = NotOut;
+			}
+		}
+	}
+
+	SourcePin->MakeLinkTo(ResultPin);
+	TransGraph->NotifyGraphChanged();
+
+	CompileAndSave(AnimBP);
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("assetPath"), AssetPath);
+	Result->SetStringField(TEXT("stateMachineName"), SMName);
+	Result->SetStringField(TEXT("transitionGuid"), TransNode->NodeGuid.ToString());
+	if (UAnimStateNode* Prev = Cast<UAnimStateNode>(TransNode->GetPreviousState()))
+		Result->SetStringField(TEXT("fromState"), Prev->GetStateName());
+	if (UAnimStateNode* Next = Cast<UAnimStateNode>(TransNode->GetNextState()))
+		Result->SetStringField(TEXT("toState"), Next->GetStateName());
+	Result->SetStringField(TEXT("variableName"), VariableName);
+	Result->SetBoolField(TEXT("negate"), bNegate);
+	return MCPResult(Result);
+}
+
+
 TSharedPtr<FJsonValue> FAnimationHandlers::ReadStateMachine(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
@@ -701,6 +995,11 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ReadStateMachine(const TSharedPtr<FJs
 			UAnimStateNode* Next = Cast<UAnimStateNode>(T->GetNextState());
 			if (Prev) TransObj->SetStringField(TEXT("fromState"), Prev->GetStateName());
 			if (Next) TransObj->SetStringField(TEXT("toState"), Next->GetStateName());
+			// #630: stable GUID handle + rule graph name. Author the condition in
+			// boundGraph via the standard graph tools (into the TransitionResult
+			// node's bCanEnterTransition pin).
+			TransObj->SetStringField(TEXT("transitionGuid"), T->NodeGuid.ToString());
+			if (T->BoundGraph) TransObj->SetStringField(TEXT("boundGraph"), T->BoundGraph->GetName());
 
 			TransObj->SetNumberField(TEXT("blendDuration"), T->CrossfadeDuration);
 			TransObj->SetStringField(TEXT("logicType"),
@@ -1254,10 +1553,13 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AddPoseSearchSequence(const TSharedPt
 		return MCPError(FString::Printf(TEXT("Animation asset type not supported by PoseSearch: %s"), *AnimAsset->GetClass()->GetName()));
 	}
 
+	// #684: optional per-clip flags (mirror / disableReselection / samplingRange / enabled).
+	const FPoseSearchClipFlags Flags = ParsePoseSearchClipFlags(Params);
+
 	const int32 PrevCount = GetPoseSearchAnimationAssetCount(Database);
 	Database->Modify();
 	FString AddError;
-	if (!AddPoseSearchAnimationAsset(Database, AnimAsset, AddError))
+	if (!AddPoseSearchAnimationAsset(Database, AnimAsset, Flags, AddError))
 	{
 		return MCPError(AddError);
 	}
@@ -1273,6 +1575,105 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AddPoseSearchSequence(const TSharedPt
 	Res->SetNumberField(TEXT("previousCount"), PrevCount);
 	Res->SetNumberField(TEXT("newCount"), NewCount);
 	Res->SetNumberField(TEXT("addedIndex"), NewCount - 1);
+	return MCPResult(Res);
+}
+
+
+// #684: bulk clip-list authoring. Replaces (or appends to) the whole clip list in
+// one call, with per-entry flags. This is the idiomatic "duplicate a stock PSD,
+// swap its clips" pipeline step that add_pose_search_sequence can only do one clip
+// at a time. Params: assetPath, clips[] ({sequencePath|asset, mirror?,
+// disableReselection?, sampleStart?, sampleEnd?, enabled?}), clearExisting? (default true).
+TSharedPtr<FJsonValue> FAnimationHandlers::SetPoseSearchClips(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+
+	UPoseSearchDatabase* Database = Cast<UPoseSearchDatabase>(UEditorAssetLibrary::LoadAsset(AssetPath));
+	if (!Database) return MCPError(FString::Printf(TEXT("PoseSearchDatabase not found: %s"), *AssetPath));
+
+	const TArray<TSharedPtr<FJsonValue>>* Clips = nullptr;
+	if (!Params->TryGetArrayField(TEXT("clips"), Clips) || !Clips)
+	{
+		return MCPError(TEXT("Missing required parameter 'clips' (array of {sequencePath, mirror?, disableReselection?, sampleStart?, sampleEnd?, enabled?})"));
+	}
+
+	const bool bClearExisting = OptionalBool(Params, TEXT("clearExisting"), true);
+	const int32 PrevCount = GetPoseSearchAnimationAssetCount(Database);
+
+	// Resolve every clip up front so a bad path fails the whole call before mutating.
+	struct FResolvedClip { UObject* Asset; FPoseSearchClipFlags Flags; FString Path; };
+	TArray<FResolvedClip> Resolved;
+	Resolved.Reserve(Clips->Num());
+	for (const TSharedPtr<FJsonValue>& ClipVal : *Clips)
+	{
+		const TSharedPtr<FJsonObject>* ClipObj = nullptr;
+		FString ClipPath;
+		if (ClipVal->TryGetObject(ClipObj) && ClipObj && (*ClipObj).IsValid())
+		{
+			if (!(*ClipObj)->TryGetStringField(TEXT("sequencePath"), ClipPath) &&
+				!(*ClipObj)->TryGetStringField(TEXT("asset"), ClipPath) &&
+				!(*ClipObj)->TryGetStringField(TEXT("assetPath"), ClipPath) &&
+				!(*ClipObj)->TryGetStringField(TEXT("animationPath"), ClipPath))
+			{
+				return MCPError(TEXT("Each clip needs a 'sequencePath' (or 'asset'/'assetPath'/'animationPath')"));
+			}
+		}
+		else if (!ClipVal->TryGetString(ClipPath))
+		{
+			return MCPError(TEXT("Each clip must be an object or an animation asset path string"));
+		}
+
+		UObject* AnimAsset = UEditorAssetLibrary::LoadAsset(ClipPath);
+		if (!AnimAsset) return MCPError(FString::Printf(TEXT("Animation asset not found: %s"), *ClipPath));
+		if (!AnimAsset->IsA<UAnimSequenceBase>() && !AnimAsset->IsA<UBlendSpace>())
+		{
+			return MCPError(FString::Printf(TEXT("Animation asset type not supported by PoseSearch: %s"), *AnimAsset->GetClass()->GetName()));
+		}
+
+		FResolvedClip RC;
+		RC.Asset = AnimAsset;
+		RC.Path = ClipPath;
+		RC.Flags = (ClipObj && (*ClipObj).IsValid()) ? ParsePoseSearchClipFlags(*ClipObj) : FPoseSearchClipFlags();
+		Resolved.Add(MoveTemp(RC));
+	}
+
+	Database->Modify();
+
+#if UE_MCP_HAS_POSESEARCH_DATABASE_ASSET_API
+	if (bClearExisting)
+	{
+		for (int32 i = GetPoseSearchAnimationAssetCount(Database) - 1; i >= 0; --i)
+		{
+			Database->RemoveAnimationAssetAt(i);
+		}
+	}
+#else
+	if (bClearExisting) Database->AnimationAssets.Empty();
+#endif
+
+	TArray<TSharedPtr<FJsonValue>> Added;
+	for (const FResolvedClip& RC : Resolved)
+	{
+		FString AddError;
+		if (!AddPoseSearchAnimationAsset(Database, RC.Asset, RC.Flags, AddError))
+		{
+			return MCPError(AddError);
+		}
+		Added.Add(MakeShared<FJsonValueString>(RC.Asset->GetPathName()));
+	}
+
+	Database->PostEditChange();
+	UEditorAssetLibrary::SaveLoadedAsset(Database);
+
+	TSharedPtr<FJsonObject> Res = MCPSuccess();
+	MCPSetUpdated(Res);
+	Res->SetStringField(TEXT("path"), AssetPath);
+	Res->SetBoolField(TEXT("clearedExisting"), bClearExisting);
+	Res->SetNumberField(TEXT("previousCount"), PrevCount);
+	Res->SetNumberField(TEXT("addedCount"), Added.Num());
+	Res->SetNumberField(TEXT("newCount"), GetPoseSearchAnimationAssetCount(Database));
+	Res->SetArrayField(TEXT("addedAssets"), Added);
 	return MCPResult(Res);
 }
 
@@ -1393,4 +1794,271 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ReadPoseSearchDatabase(const TSharedP
 	}
 
 	return MCPResult(Res);
+}
+
+// ─── #701 set_ik_rig_mesh ───────────────────────────────────────────
+// Set the preview/source skeletal mesh on an EXISTING IK Rig.
+TSharedPtr<FJsonValue> FAnimationHandlers::SetIKRigMesh(const TSharedPtr<FJsonObject>& Params)
+{
+	FString RigPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("rigPath"), TEXT("assetPath"), RigPath)) return Err;
+	FString MeshPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("meshPath"), TEXT("skeletalMesh"), MeshPath)) return Err;
+
+	UIKRigDefinition* IKRig = LoadObject<UIKRigDefinition>(nullptr, *RigPath);
+	if (!IKRig) return MCPError(FString::Printf(TEXT("IKRig not found: %s"), *RigPath));
+	USkeletalMesh* Mesh = LoadObject<USkeletalMesh>(nullptr, *MeshPath);
+	if (!Mesh) return MCPError(FString::Printf(TEXT("SkeletalMesh not found: %s"), *MeshPath));
+
+	UIKRigController* Controller = UIKRigController::GetController(IKRig);
+	if (!Controller) return MCPError(TEXT("IKRigController unavailable"));
+	const bool bOk = Controller->SetSkeletalMesh(Mesh);
+	SaveAssetPackage(IKRig);
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("rigPath"), IKRig->GetPathName());
+	Result->SetStringField(TEXT("skeletalMesh"), Mesh->GetPathName());
+	Result->SetBoolField(TEXT("applied"), bOk);
+	return MCPResult(Result);
+}
+
+namespace
+{
+	ERetargetSourceOrTarget ParseSourceOrTarget(const FString& S)
+	{
+		return S.Equals(TEXT("source"), ESearchCase::IgnoreCase)
+			? ERetargetSourceOrTarget::Source
+			: ERetargetSourceOrTarget::Target;
+	}
+}
+
+// ─── #703 set_ik_retargeter_rig ─────────────────────────────────────
+TSharedPtr<FJsonValue> FAnimationHandlers::SetIKRetargeterRig(const TSharedPtr<FJsonObject>& Params)
+{
+	FString RetargeterPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("retargeterPath"), TEXT("assetPath"), RetargeterPath)) return Err;
+	FString RigPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("rigPath"), TEXT("ikRig"), RigPath)) return Err;
+	const FString Side = OptionalString(Params, TEXT("side"), TEXT("target"));
+
+	UIKRetargeter* Retargeter = LoadObject<UIKRetargeter>(nullptr, *RetargeterPath);
+	if (!Retargeter) return MCPError(FString::Printf(TEXT("IKRetargeter not found: %s"), *RetargeterPath));
+	UIKRigDefinition* IKRig = LoadObject<UIKRigDefinition>(nullptr, *RigPath);
+	if (!IKRig) return MCPError(FString::Printf(TEXT("IKRig not found: %s"), *RigPath));
+
+	UIKRetargeterController* Controller = UIKRetargeterController::GetController(Retargeter);
+	if (!Controller) return MCPError(TEXT("IKRetargeterController unavailable"));
+	Controller->SetIKRig(ParseSourceOrTarget(Side), IKRig);
+	SaveAssetPackage(Retargeter);
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("retargeterPath"), Retargeter->GetPathName());
+	Result->SetStringField(TEXT("side"), Side.ToLower());
+	Result->SetStringField(TEXT("ikRig"), IKRig->GetPathName());
+	return MCPResult(Result);
+}
+
+// ─── #701 auto_align_retarget_pose ──────────────────────────────────
+TSharedPtr<FJsonValue> FAnimationHandlers::AutoAlignRetargetPose(const TSharedPtr<FJsonObject>& Params)
+{
+	FString RetargeterPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("retargeterPath"), TEXT("assetPath"), RetargeterPath)) return Err;
+	const FString Side = OptionalString(Params, TEXT("side"), TEXT("target"));
+
+	UIKRetargeter* Retargeter = LoadObject<UIKRetargeter>(nullptr, *RetargeterPath);
+	if (!Retargeter) return MCPError(FString::Printf(TEXT("IKRetargeter not found: %s"), *RetargeterPath));
+	UIKRetargeterController* Controller = UIKRetargeterController::GetController(Retargeter);
+	if (!Controller) return MCPError(TEXT("IKRetargeterController unavailable"));
+
+	Controller->AutoAlignAllBones(ParseSourceOrTarget(Side));
+	SaveAssetPackage(Retargeter);
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("retargeterPath"), Retargeter->GetPathName());
+	Result->SetStringField(TEXT("side"), Side.ToLower());
+	Result->SetStringField(TEXT("method"), TEXT("ChainToChain"));
+	return MCPResult(Result);
+}
+
+// ─── #701 reset_retarget_pose ───────────────────────────────────────
+TSharedPtr<FJsonValue> FAnimationHandlers::ResetRetargetPose(const TSharedPtr<FJsonObject>& Params)
+{
+	FString RetargeterPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("retargeterPath"), TEXT("assetPath"), RetargeterPath)) return Err;
+	const FString Side = OptionalString(Params, TEXT("side"), TEXT("target"));
+
+	UIKRetargeter* Retargeter = LoadObject<UIKRetargeter>(nullptr, *RetargeterPath);
+	if (!Retargeter) return MCPError(FString::Printf(TEXT("IKRetargeter not found: %s"), *RetargeterPath));
+	UIKRetargeterController* Controller = UIKRetargeterController::GetController(Retargeter);
+	if (!Controller) return MCPError(TEXT("IKRetargeterController unavailable"));
+
+	const ERetargetSourceOrTarget SoT = ParseSourceOrTarget(Side);
+	const FName CurrentPose = Controller->GetCurrentRetargetPoseName(SoT);
+	Controller->ResetRetargetPose(CurrentPose, TArray<FName>(), SoT);
+	SaveAssetPackage(Retargeter);
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("retargeterPath"), Retargeter->GetPathName());
+	Result->SetStringField(TEXT("side"), Side.ToLower());
+	Result->SetStringField(TEXT("pose"), CurrentPose.ToString());
+	return MCPResult(Result);
+}
+
+// ─── #701 batch_retarget_animations ─────────────────────────────────
+TSharedPtr<FJsonValue> FAnimationHandlers::BatchRetargetAnimations(const TSharedPtr<FJsonObject>& Params)
+{
+	FString RetargeterPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("retargeterPath"), TEXT("assetPath"), RetargeterPath)) return Err;
+	FString SourceMeshPath, TargetMeshPath;
+	if (auto Err = RequireString(Params, TEXT("sourceMesh"), SourceMeshPath)) return Err;
+	if (auto Err = RequireString(Params, TEXT("targetMesh"), TargetMeshPath)) return Err;
+
+	UIKRetargeter* Retargeter = LoadObject<UIKRetargeter>(nullptr, *RetargeterPath);
+	if (!Retargeter) return MCPError(FString::Printf(TEXT("IKRetargeter not found: %s"), *RetargeterPath));
+	USkeletalMesh* SourceMesh = LoadObject<USkeletalMesh>(nullptr, *SourceMeshPath);
+	if (!SourceMesh) return MCPError(FString::Printf(TEXT("Source mesh not found: %s"), *SourceMeshPath));
+	USkeletalMesh* TargetMesh = LoadObject<USkeletalMesh>(nullptr, *TargetMeshPath);
+	if (!TargetMesh) return MCPError(FString::Printf(TEXT("Target mesh not found: %s"), *TargetMeshPath));
+
+	const TArray<TSharedPtr<FJsonValue>>* AnimArr = nullptr;
+	if (!Params->TryGetArrayField(TEXT("animPaths"), AnimArr) || !AnimArr || AnimArr->Num() == 0)
+	{
+		return MCPError(TEXT("Missing 'animPaths' (array of AnimSequence paths to retarget)"));
+	}
+
+	// The FIKRetargetBatchOperationInputs / UIKRetargetBatchOperation::RunBatchRetarget
+	// batch API is UE 5.8+. The 5.7 batch-retarget API differs; rather than a
+	// partial reimplementation, return a clear error below 5.8.
+#if !(ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8))
+	return MCPError(TEXT("batch_retarget_animations requires UE 5.8+ (the FIKRetargetBatchOperationInputs / RunBatchRetarget API is unavailable in this engine version)."));
+#else
+	FIKRetargetBatchOperationInputs Inputs;
+	Inputs.SourceMesh = SourceMesh;
+	Inputs.TargetMesh = TargetMesh;
+	Inputs.IKRetargetAsset = Retargeter;
+	Inputs.bOverwriteExistingFiles = OptionalBool(Params, TEXT("overwrite"), false);
+	Inputs.Prefix = OptionalString(Params, TEXT("prefix"));
+	Inputs.Suffix = OptionalString(Params, TEXT("suffix"), TEXT("_Retargeted"));
+	const FString TargetPath = OptionalString(Params, TEXT("outputPath"));
+	if (TargetPath.IsEmpty()) { Inputs.bUseSourcePath = true; }
+	else { Inputs.TargetPath = TargetPath; }
+
+	int32 Loaded = 0;
+	for (const TSharedPtr<FJsonValue>& V : *AnimArr)
+	{
+		FString P;
+		if (!V->TryGetString(P) || P.IsEmpty()) continue;
+		if (UAnimSequence* Anim = LoadObject<UAnimSequence>(nullptr, *P))
+		{
+			Inputs.AssetsToRetarget.Add(FAssetData(Anim));
+			++Loaded;
+		}
+	}
+	if (Loaded == 0) return MCPError(TEXT("No valid AnimSequences resolved from animPaths"));
+
+	const TArray<FAssetData> Created = UIKRetargetBatchOperation::RunBatchRetarget(Inputs);
+
+	TArray<TSharedPtr<FJsonValue>> OutPaths;
+	for (const FAssetData& AD : Created) OutPaths.Add(MakeShared<FJsonValueString>(AD.GetObjectPathString()));
+
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetStringField(TEXT("retargeterPath"), Retargeter->GetPathName());
+	Result->SetNumberField(TEXT("requested"), Loaded);
+	Result->SetNumberField(TEXT("createdCount"), OutPaths.Num());
+	Result->SetArrayField(TEXT("createdAssets"), OutPaths);
+	return MCPResult(Result);
+#endif
+}
+
+// ─── #657 inspect_anim_nodes ────────────────────────────────────────
+// Deep-dump the FAnimNode_* struct on anim graph nodes. read_anim_graph skips
+// properties starting with "Node", which is exactly where the anim node data
+// lives - so a PoseDriver's PoseTargets/PoseAsset/RBFParams/source bones were
+// invisible. Optional nodeClass substring filters (e.g. "PoseDriver").
+TSharedPtr<FJsonValue> FAnimationHandlers::InspectAnimNodes(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
+	const FString GraphName = OptionalString(Params, TEXT("graphName"), TEXT("AnimGraph"));
+	const FString ClassFilter = OptionalString(Params, TEXT("nodeClass"));
+
+	UAnimBlueprint* AnimBP = LoadAnimBP(AssetPath);
+	if (!AnimBP) return MCPError(FString::Printf(TEXT("AnimBlueprint not found: %s"), *AssetPath));
+	UEdGraph* TargetGraph = FindGraphByName(AnimBP, GraphName);
+	if (!TargetGraph) return MCPError(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+
+	// Recursively export a struct's editable sub-properties as name/type/value.
+	TFunction<TSharedPtr<FJsonObject>(const UStruct*, const void*, int32)> DumpStruct;
+	DumpStruct = [&DumpStruct](const UStruct* Struct, const void* Container, int32 Depth) -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		if (!Struct || !Container) return Obj;
+		for (TFieldIterator<FProperty> It(Struct, EFieldIteratorFlags::IncludeSuper); It; ++It)
+		{
+			FProperty* Prop = *It;
+			if (!Prop) continue;
+			const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Container);
+			const FString PName = Prop->GetName();
+
+			// Recurse one level into nested structs (RBFParams, etc.) for readability.
+			if (Depth < 2)
+			{
+				if (const FStructProperty* SubStruct = CastField<FStructProperty>(Prop))
+				{
+					Obj->SetObjectField(PName, DumpStruct(SubStruct->Struct, ValuePtr, Depth + 1));
+					continue;
+				}
+			}
+			FString ValueStr;
+			Prop->ExportTextItem_Direct(ValueStr, ValuePtr, nullptr, nullptr, PPF_None);
+			Obj->SetStringField(PName, ValueStr);
+		}
+		return Obj;
+	};
+
+	TArray<TSharedPtr<FJsonValue>> NodesArray;
+	for (UEdGraphNode* Node : TargetGraph->Nodes)
+	{
+		if (!Node) continue;
+		const FString NodeClassName = Node->GetClass()->GetName();
+		if (!ClassFilter.IsEmpty() && !NodeClassName.Contains(ClassFilter)) continue;
+
+		// Find the FAnimNode_* struct member (its type derives from FAnimNode_Base).
+		FStructProperty* AnimNodeProp = nullptr;
+		for (TFieldIterator<FProperty> It(Node->GetClass(), EFieldIteratorFlags::IncludeSuper); It; ++It)
+		{
+			if (FStructProperty* SP = CastField<FStructProperty>(*It))
+			{
+				if (SP->Struct && SP->Struct->GetName().StartsWith(TEXT("AnimNode_")))
+				{
+					AnimNodeProp = SP;
+					break;
+				}
+			}
+		}
+		if (ClassFilter.IsEmpty() && !AnimNodeProp) continue; // only anim nodes when unfiltered
+
+		TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
+		NodeObj->SetStringField(TEXT("id"), Node->NodeGuid.ToString());
+		NodeObj->SetStringField(TEXT("class"), NodeClassName);
+		NodeObj->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+		if (AnimNodeProp)
+		{
+			NodeObj->SetStringField(TEXT("animNodeStruct"), AnimNodeProp->Struct->GetName());
+			NodeObj->SetObjectField(TEXT("node"), DumpStruct(AnimNodeProp->Struct, AnimNodeProp->ContainerPtrToValuePtr<void>(Node), 0));
+		}
+		NodesArray.Add(MakeShared<FJsonValueObject>(NodeObj));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("assetPath"), AssetPath);
+	Result->SetStringField(TEXT("graphName"), GraphName);
+	Result->SetNumberField(TEXT("count"), NodesArray.Num());
+	Result->SetArrayField(TEXT("nodes"), NodesArray);
+	return MCPResult(Result);
 }

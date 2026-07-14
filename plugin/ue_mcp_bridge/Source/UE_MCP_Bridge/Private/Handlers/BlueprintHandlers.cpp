@@ -89,6 +89,8 @@ void FBlueprintHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("rename_function"), &RenameFunction);
 	Registry.RegisterHandler(TEXT("delete_function"), &DeleteFunction);
 	Registry.RegisterHandler(TEXT("create_blueprint_interface"), &CreateBlueprintInterface);
+	Registry.RegisterHandler(TEXT("override_function"), &OverrideFunction);
+	Registry.RegisterHandler(TEXT("list_overridable_functions"), &ListOverridableFunctions);
 	Registry.RegisterHandler(TEXT("connect_pins"), &ConnectPins);
 	Registry.RegisterHandler(TEXT("delete_node"), &DeleteNode);
 	Registry.RegisterHandler(TEXT("set_node_property"), &SetNodeProperty);
@@ -1452,10 +1454,29 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::CompileBlueprint(const TSharedPtr<FJs
 		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
 	}
 
-	FKismetEditorUtilities::CompileBlueprint(Blueprint);
+	// #703: capture the compiler log and report real status instead of always
+	// returning success. Mirrors the batch compile_blueprints path.
+	FCompilerResultsLog CompileLog;
+	CompileLog.SetSourcePath(Blueprint->GetPathName());
+	CompileLog.BeginEvent(TEXT("Compile"));
+	FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &CompileLog);
+	CompileLog.EndEvent();
+
+	TArray<TSharedPtr<FJsonValue>> Messages;
+	for (const TSharedRef<FTokenizedMessage>& Msg : CompileLog.Messages)
+	{
+		Messages.Add(MakeShared<FJsonValueString>(Msg->ToText().ToString()));
+	}
+
+	const bool bCompiled = CompileLog.NumErrors == 0 &&
+		Blueprint->Status != EBlueprintStatus::BS_Error;
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
+	Result->SetBoolField(TEXT("compiled"), bCompiled);
+	Result->SetNumberField(TEXT("errors"), CompileLog.NumErrors);
+	Result->SetNumberField(TEXT("warnings"), CompileLog.NumWarnings);
+	Result->SetArrayField(TEXT("messages"), Messages);
 	return MCPResult(Result);
 }
 

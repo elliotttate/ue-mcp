@@ -1,4 +1,4 @@
-export const SERVER_INSTRUCTIONS = `UE-MCP: Unreal Engine editor bridge (C++ plugin) — 19 category tools covering 425+ actions.
+export const SERVER_INSTRUCTIONS = `UE-MCP: Unreal Engine editor bridge (C++ plugin) - 24 category tools covering 685+ actions, plus 830 official Unreal 5.8 tools wrapped in-process (UE 5.8+; see the epic category).
 
 Every tool takes an "action" parameter that selects the operation. Call project(action="get_status") first.
 
@@ -11,133 +11,13 @@ Every tool takes an "action" parameter that selects the operation. Call project(
 6. demo(action="step", stepIndex=1) through 19 — run the Neon Shrine demo to see the bridge in action
 7. demo(action="cleanup") — clean up after the demo
 
-═══ TOOLS & ACTIONS ═══
+═══ TOOLS ═══
 
-project — Project status, config INI, C++ source
-  get_status, set_project, get_info, read_config, search_config, list_config_tags,
-  set_config, read_cpp_header, read_module, list_modules, search_cpp
-
-asset — Assets: list, search, CRUD, import, export, datatables, textures
-  list, search, read, read_properties, list_properties, get_properties, duplicate, rename, move, delete, save,
-  import_static_mesh, import_skeletal_mesh, import_animation, import_texture,
-  read_datatable, create_datatable, reimport_datatable, list_textures,
-  get_texture_info, set_texture_settings,
-  add_socket, remove_socket, list_sockets
-
-blueprint — Blueprint reading, authoring, compilation
-  read, list_variables, list_functions, read_graph, create, add_variable,
-  set_variable_properties, create_function, delete_function, rename_function,
-  add_node, delete_node, set_node_property, connect_pins, add_component,
-  compile, list_node_types, search_node_types, create_interface, add_interface,
-  add_event_dispatcher, list_graphs
-
-level — Level actors, selection, components, volumes, lights, splines
-  get_outliner, place_actor, delete_actor, get_actor_details, move_actor,
-  select, get_selected, add_component, set_component_property,
-  get_current, load, save, list, create,
-  spawn_volume, list_volumes, set_volume_properties,
-  spawn_light, set_light_properties, build_lighting,
-  get_spline_info, set_spline_points
-
-material — Materials, shading, and graph authoring
-  read, list_parameters, set_parameter, read_instance, set_instance_parent,
-  clear_instance_parameters, list_static_switches, set_static_switch,
-  create_instance, create,
-  set_shading_model, set_base_color, connect_texture,
-  add_expression, connect_expressions, connect_to_property,
-  list_expressions, delete_expression, list_expression_types, recompile
-
-animation — Anim assets, skeletons, montages, blendspaces
-  read_anim_blueprint, read_montage, read_sequence, scan_animation_tracks, read_blendspace, list,
-  create_montage, create_anim_blueprint, create_blendspace, add_notify,
-  get_skeleton_info, list_sockets, list_skeletal_meshes, get_physics_asset,
-  create_sequence, set_bone_keyframes, get_bone_transforms,
-  set_montage_sequence, set_montage_properties
-
-landscape — Terrain sculpting, painting, layers
-  get_info, list_layers, sample, list_splines, get_component,
-  sculpt, paint_layer, set_material, add_layer_info, import_heightmap
-
-pcg — Procedural Content Generation graphs
-  list_graphs, read_graph, read_node_settings, get_components,
-  get_component_details, create_graph, add_node, connect_nodes,
-  set_node_settings, remove_node, execute, add_volume
-
-foliage — Foliage painting and types
-  list_types, get_settings, sample, paint, erase, create_type, set_settings
-
-niagara — VFX systems and graph authoring
-  list, get_info, spawn, set_parameter, create,
-  create_emitter, add_emitter, list_emitters, set_emitter_property,
-  list_modules, get_emitter_info
-
-audio — Sound assets and playback
-  list, play_at_location, spawn_ambient, create_cue, create_metasound
-
-widget — UMG widgets and editor utilities
-  read_tree, get_details, set_property (slot.* for layout), list, read_animations,
-  create, add_widget, remove_widget, move_widget, list_classes,
-  create_utility_widget, run_utility_widget,
-  create_utility_blueprint, run_utility_blueprint
-
-editor — Console, Python, PIE, viewport, sequencer, perf, build pipeline, logs
-  execute_command, execute_python, set_property, get_property,
-  describe_object, play_in_editor,
-  get_runtime_value, hot_reload, undo, redo,
-  get_perf_stats, run_stat, set_scalability, capture_screenshot,
-  get_viewport, set_viewport, focus_on_actor,
-  create_sequence, get_sequence_info, add_sequence_track, play_sequence,
-  build_all, build_geometry, build_hlod, validate_assets,
-  get_build_status, cook_content,
-  get_log, search_log, get_message_log,
-  set_dialog_policy, clear_dialog_policy, get_dialog_policy,
-  list_dialogs, respond_to_dialog
-
-reflection — UE class/struct/enum reflection, gameplay tags
-  reflect_class, reflect_struct, reflect_enum, list_classes,
-  list_tags, create_tag
-
-gameplay — Physics, collision, navigation, input, behavior trees, AI, game framework
-  set_collision_profile, set_simulate_physics, set_collision_enabled,
-  set_physics_properties, rebuild_navigation, get_navmesh_info,
-  project_to_nav, spawn_nav_modifier,
-  list_input_assets,
-  list_behavior_trees, get_behavior_tree_info,
-  create_blackboard, create_behavior_tree,
-  create_eqs_query, list_eqs_queries,
-  add_perception, configure_sense,
-  create_state_tree, list_state_trees, add_state_tree_component,
-  create_smart_object_def, add_smart_object_component,
-  create_game_mode, create_game_state, create_player_controller,
-  create_player_state, create_hud, set_world_game_mode, get_framework_info
-
-gas — Gameplay Ability System
-  add_asc, create_attribute_set, add_attribute,
-  create_ability, set_ability_tags,
-  create_effect, set_effect_modifier,
-  create_cue, get_info
-
-networking — Replication and networking
-  set_replicates, set_property_replicated, configure_net_frequency,
-  set_dormancy, set_net_load_on_client, set_always_relevant,
-  set_only_relevant_to_owner, configure_cull_distance,
-  set_priority, set_replicate_movement, get_info
-
-statetree — StateTree asset editing: read, modify states/tasks/conditions/transitions/bindings, compile
-  read, list_states, add_state, remove_state, set_state_property, clear_state_nodes,
-  add_task, add_enter_condition, remove_task, set_task_instance_property,
-  add_transition, add_transition_condition, remove_transition,
-  add_binding, remove_binding, list_bindings,
-  set_root_parameters, compile, validate
-
-demo — Neon Shrine demo scene
-  step, cleanup
-
-feedback — Agent feedback submission
-  submit
-
-plugins — Introspect npm-distributed plugins that inject actions into other categories (read-only)
-  list, describe
+Every category tool lists its own actions (and each action's parameters) in
+its description - read the description of the category you need. Categories:
+project, asset, blueprint, level, material, animation, landscape, pcg, foliage,
+niagara, audio, widget, editor, reflection, gameplay, gas, networking, demo,
+feedback, statetree, chooser, plugins, epic (830 wrapped Unreal 5.8 tools; UE 5.8+).
 
 ═══ TIPS ═══
 • Start with level(action="get_outliner") or asset(action="list") to discover what's in the project.
@@ -223,4 +103,63 @@ If the user agrees, call feedback(action="submit") with:
   • pythonWorkaround — the Python code that was used
   • idealTool — what tool/action should handle this natively
 This creates a GitHub issue so the maintainers can add proper support.
+`;
+
+// Compact instructions used when context.strategy = "lean". The per-action
+// catalog is intentionally omitted: agents pull it on demand via the `catalog`
+// tool or a category's `describe` action. This keeps the initialize handshake
+// small for token-constrained clients while preserving full capability.
+export const SERVER_INSTRUCTIONS_LEAN = `UE-MCP (lean mode): Unreal Engine editor bridge (C++ plugin). 24 category tools; the per-action catalog is loaded on demand to keep context small.
+
+Every tool takes an "action" parameter that selects the operation. Start with project(action="get_status").
+
+═══ DISCOVER ACTIONS ═══
+Tool descriptions are trimmed in lean mode. Find the action you need with:
+- catalog(action="search", query="spawn actor") - rank matching actions across every category
+- catalog(action="list_categories") - the 23 categories with one-line summaries
+- <category>(action="describe") - every action in one category (e.g. blueprint(action="describe"))
+
+Each category's "action" parameter is still a validated enum, so unknown actions are rejected up front. Call describe/search first when you are unsure of the exact action name.
+
+═══ CATEGORIES ═══
+project, asset, blueprint, level, material, animation, landscape, pcg, foliage,
+niagara, audio, widget, editor, reflection, gameplay, gas, networking, demo,
+feedback, statetree, chooser, plugins, epic (830 wrapped Unreal 5.8 tools; UE 5.8+).
+
+═══ FLOWS ═══
+Before chaining 3+ tool calls, check the \`flows\` field from project(action="get_status")
+and run a matching flow with flow(action="run", flowName="<name>") instead of rebuilding it.
+
+═══ FEEDBACK ═══
+If you had to fall back to editor(action="execute_python") because a native tool could not
+do the job, tell the user when done and offer to feedback(action="submit") the gap.
+
+Full mode (every action listed inline) is the default. This lean surface is selected by
+context.strategy: lean in ue-mcp.yml or UE_MCP_CONTEXT_STRATEGY=lean.
+`;
+
+// Smallest surface (context.strategy = "micro"). The entire ue-mcp API is
+// reached through one gateway tool, mirroring the native MCP toolset gateway
+// (list_toolsets / describe_toolset / call_tool). Nothing else is advertised.
+export const SERVER_INSTRUCTIONS_MICRO = `UE-MCP (micro mode): Unreal Engine editor bridge (C++ plugin). The entire surface (23 categories, 600+ actions) is reached through a single gateway tool to keep context tiny.
+
+═══ HOW TO USE ═══
+- tools(action="list_categories") - list every category with a one-line summary
+- tools(action="describe", category="blueprint") - list a category's actions and how to call them
+- tools(action="call", category="blueprint", method="create", args={ ... }) - invoke any action
+
+\`method\` is the action name; \`args\` is the object of that action's parameters.
+Start with: tools(action="call", category="project", method="get_status").
+
+═══ CATEGORIES ═══
+project, asset, blueprint, level, material, animation, landscape, pcg, foliage,
+niagara, audio, widget, editor, reflection, gameplay, gas, networking, demo,
+feedback, statetree, chooser, plugins, epic (830 wrapped Unreal 5.8 tools; UE 5.8+).
+
+═══ FLOWS ═══
+flow(action="run", flowName="<name>") runs a named sequence; see the \`flows\` field
+from tools(action="call", category="project", method="get_status").
+
+Full mode (every action listed inline) is the default. This micro surface is selected by
+context.strategy: micro in ue-mcp.yml or UE_MCP_CONTEXT_STRATEGY=micro.
 `;

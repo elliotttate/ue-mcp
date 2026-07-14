@@ -32,6 +32,11 @@ private:
 	static TSharedPtr<FJsonValue> SetStructMembers(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadStructMembers(const TSharedPtr<FJsonObject>& Params);
 
+	// #689: probe whether a UClass / module is currently loaded in the editor.
+	static TSharedPtr<FJsonValue> IsClassLoaded(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> IsModuleLoaded(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ListLoadedModules(const TSharedPtr<FJsonObject>& Params);
+
 	// Helper functions
 	static UClass* FindClass(const FString& ClassName);
 	static UScriptStruct* FindStruct(const FString& StructName);

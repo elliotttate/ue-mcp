@@ -1,6 +1,6 @@
 # UE-MCP
 
-**Unreal Engine Model Context Protocol Server** - gives AI assistants deep read/write access to the Unreal Editor through <!-- count:tools -->28<!-- /count --> category tools covering <!-- count:actions -->609+<!-- /count --> actions, plus a YAML flow engine for multi-step workflows.
+**Unreal Engine Model Context Protocol Server** - gives AI assistants deep read/write access to the Unreal Editor through <!-- count:tools -->31<!-- /count --> category tools covering <!-- count:actions -->830+<!-- /count --> actions, plus a YAML flow engine for multi-step workflows.
 
 ```mermaid
 flowchart LR
@@ -53,17 +53,9 @@ If you prefer to configure manually, add to your MCP client config:
 
 ## Documentation
 
-**[db-lyon.github.io/ue-mcp](https://db-lyon.github.io/ue-mcp/)**
+**[https://ue-mcp.com/docs](https://ue-mcp.com/docs)**
 
-- [Getting Started](https://db-lyon.github.io/ue-mcp/getting-started/) — Installation, configuration, first run
-- [Architecture](https://db-lyon.github.io/ue-mcp/architecture/) — How the pieces fit together
-- [Tool Reference](https://db-lyon.github.io/ue-mcp/tool-reference/) - All <!-- count:tools -->28<!-- /count --> tools with <!-- count:actions -->609+<!-- /count --> actions
-- [Flows](https://db-lyon.github.io/ue-mcp/flows/) - YAML flow engine, custom tasks, rollback, hooks
-- [Configuration](https://db-lyon.github.io/ue-mcp/configuration/) — `.ue-mcp.json` and MCP client config
-- [Neon Shrine Demo](https://db-lyon.github.io/ue-mcp/neon-shrine-demo/) — Interactive guided demo
-- [Feedback](https://db-lyon.github.io/ue-mcp/feedback/) — Agent feedback system
-- [Troubleshooting](https://db-lyon.github.io/ue-mcp/troubleshooting/) — Common issues and fixes
-- [Development](https://db-lyon.github.io/ue-mcp/development/) — Building, testing, contributing
+- [Getting Started](https://ue-mcp.com/docs/getting-started/) — Installation, configuration, first run
 
 ## What Can It Do?
 
@@ -87,7 +79,7 @@ If you prefer to configure manually, add to your MCP client config:
 
 ## Supported Platforms
 
-- **Windows** — UE 5.4–5.7
+- **Windows** — UE 5.4–5.8
 - **Linux** — UE 5.6+ (contributed by [@robinduckett](https://github.com/robinduckett))
 
 Requires `PythonScriptPlugin` (ships with UE 4.26+).

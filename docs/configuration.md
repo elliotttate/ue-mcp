@@ -42,42 +42,32 @@ You can start the server without a `.uproject` argument. It will run in a limite
 
 ## Project Configuration (`ue-mcp.yml`)
 
-Project-level config lives under the `ue-mcp:` block at the top of `ue-mcp.yml`, next to your `.uproject`. The file is meant to be tracked in git so every collaborator sees the same project surface. `npx ue-mcp init` creates and maintains it for you, but hand-editing is fine — there's nothing in it the server treats as opaque machine state.
+Project config lives in `ue-mcp.yml` next to your `.uproject`, tracked in git so every collaborator shares the same surface. `npx ue-mcp init` scaffolds and maintains it.
 
 ```yaml
 ue-mcp:
   version: 1
-  contentRoots:
-    - /Game/
-    - /MyPlugin/
-  disable:
-    - gas
-    - networking
-  http:
-    enabled: false
-
+  contentRoots: [/Game/, /MyPlugin/]
+  disable: [gas]
+  nativeTools: { enabled: true }
+  http: { enabled: false }
+  context: { strategy: full }
 tasks: {}
 flows: {}
 plugins: []
 ```
 
-!!! info "User-machine state"
-    Anything that varies per machine (e.g. the list of absolute paths to Claude Code settings files where the feedback hook was installed) lives in `~/.ue-mcp/state.json`, **not** in the project tree. The user-state file is maintained automatically by `npx ue-mcp init` / `npx ue-mcp uninstall-hooks`; you shouldn't need to touch it.
+The file is one layer in a deep-merged stack (user-global → project → env → local → env vars). For the full anatomy, the layer cascade, where each setting belongs, and every `ue-mcp:` key, see the dedicated **[ue-mcp.yml Reference](config-file.md)**. The behavioral deep-dives for two of its keys live below: [Native Epic tools](#native-epic-5-8-tools) (`nativeTools`) and [Context strategy](#context-strategy-full-lean-micro) (`context`).
 
-!!! tip "Migrating from older versions"
-    - Pre-1.0.29 used `.ue-mcp.json` for the project config.
-    - 1.0.29 briefly introduced `ue-mcp.local.yml` for user-machine state, then moved that state to `~/.ue-mcp/state.json` in 1.0.30.
+### Native Epic 5.8 tools
 
-    On first load after upgrade, the server detects either legacy file and migrates the contents (project fields → `ue-mcp.yml`, machine state → `~/.ue-mcp/state.json`) automatically, then deletes the legacy file. You don't need to do anything.
+Unreal Engine 5.8 ships an experimental AI Toolset Registry (the plugin behind Unreal's own MCP server). ue-mcp reaches that registry in-process and surfaces every official toolset as first-class actions inside the matching ue-mcp category - Epic's GAS tools appear in `gas`, Niagara in `niagara`, and so on - so an agent discovers them in context. Toolsets with no natural home are reachable through the `epic` gateway (`status` / `list_toolsets` / `describe_toolset` / `call_tool`).
 
-### `ue-mcp:` block options
+- **On by default.** `npx ue-mcp init` includes a "Native Unreal tools (Epic 5.8)" page where you enable the feature and optionally exclude specific categories. The choice is written to `nativeTools` in `ue-mcp.yml`.
+- **Requires UE 5.8+** with the `ToolsetRegistry` plugin (and the toolset plugins you want) enabled in your project. On older engines or when the plugin is absent, enrichment is skipped and `epic(status)` reports `available: false`.
+- **Deterministic surface.** The catalog is sourced from the live editor when connected, falling back to a per-project cache and then a snapshot baked into the ue-mcp package, so the wrapped tools appear even on a cold first start and match the generated [tool reference](tool-reference.md) (both are built from the same snapshot). The 🧩 badge in the tool reference marks every wrapped official tool.
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `version` | `1` | `1` | Schema version; required. Set automatically by init. |
-| `contentRoots` | `string[]` | `["/Game/"]` | Content paths to search when using `asset(action="search")`. Add plugin content roots here if your project uses plugins with their own assets. |
-| `disable` | `string[]` | `[]` | Tool categories to disable. Disabled categories are not registered with the MCP server, reducing context noise for the AI. Use `"feedback"` here to opt out of the feedback tool entirely. |
-| `http` | `object` | `undefined` (HTTP server off) | Optional REST surface for the flow engine. Object with `enabled` (bool), `port` (default `7723`), `host` (default `127.0.0.1`). When `enabled: true`, the MCP server also serves `GET /flows`, `GET /flows/<name>/plan`, `POST /flows/<name>/run`, and the Server-Sent Events stream at `GET /flows/events` (live per-step lifecycle events; see [Live Observation](flows.md#live-observation-sse)) over HTTP so external tools can drive and observe flows without an MCP client. |
+To turn it off entirely, set `nativeTools.enabled: false` (the `epic` gateway stays available). To keep it on but drop a noisy domain, add that category to `nativeTools.exclude`.
 
 The feedback approval mode (`interactive` / `auto-approve` / `defer`) is intentionally **not** in `ue-mcp.yml` — it varies per developer and per machine, so it lives in `~/.ue-mcp/state.json` and is managed with `npx ue-mcp feedback mode ...` or the `UE_MCP_FEEDBACK_MODE` env var. See [Feedback → modes](feedback.md#feedback-modes).
 
@@ -121,9 +111,42 @@ A plugin can declare `uePluginDependency: <PluginName>` in its `ue-mcp.plugin.ym
 
 For example, a plugin that declares `uePluginDependency: SomePlugin` will report `uePluginPresent: false` until `SomePlugin` is added to `<Project>.uproject`'s `Plugins` array and the C++ modules are built.
 
+## Context strategy (full, lean, micro)
+
+Everything the server injects at session start - the `initialize` instructions plus the whole `tools/list` payload (names, descriptions, and parameter schemas) - is the "context tax". Three strategies trade that seed cost against how many discovery round-trips an agent makes. Measure the tax on your own project with `npm run context-tax` (set `ANTHROPIC_API_KEY` for exact token counts).
+
+| Strategy | Seed (test project) | What's advertised | Cost to use |
+|----------|--------------------|-------------------|-------------|
+| **`full`** (default) | ~45k tokens | all 22 category tools, every action + parameter inline | zero discovery calls |
+| **`lean`** | ~23k tokens | the same 22 tools with their validated `action` enums, but descriptions collapsed to a summary; a `catalog` tool (`search` / `describe` / `list_categories`) and a per-category `describe` action serve the details on demand | ~1 round-trip to learn a category |
+| **`micro`** | ~1k tokens | a single `tools` gateway - `list_categories`, `describe`, and `call` - fronting every category; nothing else | discovery for everything |
+
+- **full** is best when the agent should see the entire surface up front and you are not token-constrained.
+- **lean** keeps action names visible (so the model can often call directly, and unknown actions are still rejected up front) while dropping the prose. A solid middle ground.
+- **micro** mirrors the native MCP toolset gateway (`list_toolsets` / `describe_toolset` / `call_tool`): the agent calls `tools(action="list_categories")`, then `tools(action="describe", category="blueprint")`, then `tools(action="call", category="blueprint", method="create", args={ ... })`. Smallest possible seed, most discovery traffic.
+
+Set the strategy with the standalone command (writes `ue-mcp.yml` for you):
+
+```
+npx ue-mcp context full      # every action inline (default)
+npx ue-mcp context lean      # names visible, descriptions on demand
+npx ue-mcp context micro     # one gateway tool fronts everything
+npx ue-mcp context           # show the current strategy
+```
+
+`npx ue-mcp init` also has a **Context strategy** page. Or edit `ue-mcp.yml` directly:
+
+```yaml
+ue-mcp:
+  context:
+    strategy: micro
+```
+
+Or per session, without editing the file: `UE_MCP_CONTEXT_STRATEGY=micro` (the env var wins over the config value). Anything other than `lean` or `micro` resolves to `full`. Restart your MCP client (`/mcp` in Claude Code) after changing the strategy.
+
 ## Bridge Connection
 
-The C++ plugin listens on **`ws://localhost:9877`** (currently hardcoded). The MCP server auto-connects on startup and reconnects every 15 seconds if the connection drops.
+The C++ plugin listens on **`ws://127.0.0.1:9877`** (it walks up to the next free port and publishes the bound port to `<project>/Saved/UE_MCP_Bridge/port.json` when several editors run side by side). The MCP server auto-connects on startup and reconnects every 15 seconds if the connection drops.
 
 ### Connection States
 
@@ -173,6 +196,7 @@ The C++ bridge plugin enables these UE plugins (adding them to `.uproject` if mi
 | `npx ue-mcp plugin install <name>` | Install a ue-mcp plugin from npm and register it in `ue-mcp.yml`. See [Configuration → Plugins](#plugins). |
 | `npx ue-mcp plugin uninstall <name>` | Inverse of install. |
 | `npx ue-mcp plugin create <name>` | Scaffold a new plugin package. See [Plugins](plugins.md). |
+| `npx ue-mcp context [full\|lean\|micro]` | Read or set the [context strategy](#context-strategy-full-lean-micro) in `ue-mcp.yml`. No argument prints the current strategy. |
 
 ## Editor Lifecycle
 

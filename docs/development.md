@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) 18+
-- Unreal Engine 5.4–5.7 (for live testing)
+- Unreal Engine 5.4–5.8 (for live testing)
 - A UE project to test against
 
 ## Setup
@@ -76,7 +76,7 @@ src/
 ├── auth.ts               # GitHub OAuth device flow + ~/.ue-mcp/auth.json token cache
 ├── init.ts / update.ts / resolve.ts / hook-handler.ts  # CLI subcommands
 ├── flow/                 # Flow engine (registry, loader, task factory, HTTP)
-└── tools/                # <!-- count:tools -->28<!-- /count --> tool category implementations
+└── tools/                # <!-- count:tools -->31<!-- /count --> tool category implementations
     ├── project.ts
     ├── asset.ts
     ├── blueprint.ts
@@ -105,7 +105,7 @@ plugin/ue_mcp_bridge/     # C++ bridge plugin (deployed to UE projects)
         ├── BridgeServer.cpp/.h
         ├── HandlerRegistry.cpp/.h
         ├── GameThreadExecutor.cpp/.h
-        └── Handlers/          # 23 C++ handler groups
+        └── Handlers/          # 29 C++ handler groups
 
 tests/smoke/               # Smoke tests (require live editor)
 tests/unit/                # Pure-TypeScript unit tests (no editor needed)

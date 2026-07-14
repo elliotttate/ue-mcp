@@ -56,12 +56,19 @@ nav:
   - Architecture: architecture.md
   - Tool Reference: tool-reference.md
   - Project Intelligence: project-intelligence.md
+  - Native Tools: native-tools.md
   - Handler Conventions: handler-conventions.md
   - Flows: flows.md
   - Plugins:
     - plugins.md
+    - Using: plugins-using.md
+    - Authoring: plugins-authoring.md
+    - Native Modules: plugins-native-modules.md
+    - Guards: plugins-guards.md
+    - Troubleshooting: plugins-troubleshooting.md
     - PIE Studio: pie-record-replay.md
   - Configuration: configuration.md
+  - ue-mcp.yml Reference: config-file.md
   - Neon Shrine Demo: neon-shrine-demo.md
   - Feedback: feedback.md
   - Troubleshooting: troubleshooting.md

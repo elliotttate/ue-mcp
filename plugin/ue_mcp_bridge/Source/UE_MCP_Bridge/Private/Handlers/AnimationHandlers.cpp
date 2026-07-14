@@ -93,6 +93,8 @@ void FAnimationHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("set_bone_keyframes"), &SetBoneKeyframes);
 	Registry.RegisterHandler(TEXT("bake_keyframes_batch"), &BakeKeyframesBatch);
 	Registry.RegisterHandler(TEXT("get_bone_transforms"), &GetBoneTransforms);
+	// #656: curve vs morph-target comparison.
+	Registry.RegisterHandler(TEXT("compare_curves_to_morph_targets"), &CompareCurvesToMorphTargets);
 	Registry.RegisterHandler(TEXT("set_montage_sequence"), &SetMontageSequence);
 	Registry.RegisterHandler(TEXT("set_montage_properties"), &SetMontageProperties);
 
@@ -102,13 +104,18 @@ void FAnimationHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("add_transition"), &AddTransition);
 	Registry.RegisterHandler(TEXT("set_state_animation"), &SetStateAnimation);
 	Registry.RegisterHandler(TEXT("set_transition_blend"), &SetTransitionBlend);
+	Registry.RegisterHandler(TEXT("set_transition_condition"), &SetTransitionCondition);
 	Registry.RegisterHandler(TEXT("read_state_machine"), &ReadStateMachine);
 
 	// AnimGraph inspection (#23 / #91)
 	Registry.RegisterHandler(TEXT("read_anim_graph"), &ReadAnimGraph);
+	// #657: deep anim-node struct inspection (PoseDriver, RBF, etc.).
+	Registry.RegisterHandler(TEXT("inspect_anim_nodes"), &InspectAnimNodes);
 
 	// Float curve authoring (#79 / #24)
 	Registry.RegisterHandler(TEXT("add_curve"), &AddCurve);
+	Registry.RegisterHandler(TEXT("set_anim_curve_keys"), &SetAnimCurveKeys);
+	Registry.RegisterHandler(TEXT("apply_animation_modifier"), &ApplyAnimationModifier);
 
 	// Montage slot & section editing (#78, #27)
 	Registry.RegisterHandler(TEXT("set_montage_slot"), &SetMontageSlot);
@@ -117,6 +124,12 @@ void FAnimationHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// IK Rig (#93)
 	Registry.RegisterHandler(TEXT("create_ik_rig"), &CreateIKRig);
 	Registry.RegisterHandler(TEXT("read_ik_rig"), &ReadIKRig);
+	// #701/#703: IK authoring tail + batch retarget.
+	Registry.RegisterHandler(TEXT("set_ik_rig_mesh"), &SetIKRigMesh);
+	Registry.RegisterHandler(TEXT("set_ik_retargeter_rig"), &SetIKRetargeterRig);
+	Registry.RegisterHandler(TEXT("auto_align_retarget_pose"), &AutoAlignRetargetPose);
+	Registry.RegisterHandler(TEXT("reset_retarget_pose"), &ResetRetargetPose);
+	Registry.RegisterHandlerWithTimeout(TEXT("batch_retarget_animations"), &BatchRetargetAnimations, 300.0f);
 
 	// Control Rig (#11)
 	Registry.RegisterHandler(TEXT("list_control_rig_variables"), &ListControlRigVariables);
@@ -151,8 +164,26 @@ void FAnimationHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("create_pose_search_database"), &CreatePoseSearchDatabase);
 	Registry.RegisterHandler(TEXT("set_pose_search_schema"), &SetPoseSearchSchema);
 	Registry.RegisterHandler(TEXT("add_pose_search_sequence"), &AddPoseSearchSequence);
+	Registry.RegisterHandler(TEXT("set_pose_search_clips"), &SetPoseSearchClips);
 	Registry.RegisterHandler(TEXT("build_pose_search_index"), &BuildPoseSearchIndex);
 	Registry.RegisterHandler(TEXT("read_pose_search_database"), &ReadPoseSearchDatabase);
+
+	// Motion Matching content pipeline (schema / mirror / normalization / tuning)
+	Registry.RegisterHandler(TEXT("create_pose_search_schema"), &CreatePoseSearchSchema);
+	Registry.RegisterHandler(TEXT("add_pose_search_schema_pose_channel"), &AddPoseSearchSchemaPoseChannel);
+	Registry.RegisterHandler(TEXT("add_pose_search_schema_trajectory_channel"), &AddPoseSearchSchemaTrajectoryChannel);
+	Registry.RegisterHandler(TEXT("read_pose_search_schema"), &ReadPoseSearchSchema);
+	Registry.RegisterHandler(TEXT("create_mirror_data_table"), &CreateMirrorDataTable);
+	Registry.RegisterHandler(TEXT("read_mirror_data_table"), &ReadMirrorDataTable);
+	Registry.RegisterHandler(TEXT("create_pose_search_normalization_set"), &CreatePoseSearchNormalizationSet);
+	Registry.RegisterHandler(TEXT("set_pose_search_database_settings"), &SetPoseSearchDatabaseSettings);
+	Registry.RegisterHandler(TEXT("add_motion_matching_node"), &AddMotionMatchingNode);
+	Registry.RegisterHandler(TEXT("add_pose_history_node"), &AddPoseHistoryNode);
+	Registry.RegisterHandler(TEXT("set_motion_matching_chooser"), &SetMotionMatchingChooser);
+
+	// #713 — distance-matching graph authoring
+	Registry.RegisterHandler(TEXT("add_sequence_evaluator"), &AddSequenceEvaluator);
+	Registry.RegisterHandler(TEXT("bind_anim_node_function"), &BindAnimNodeFunction);
 
 	// #419/#420 — live-actor skeletal reads + rebind + preview (moved from Level)
 	Registry.RegisterHandler(TEXT("get_bone_transform"), &GetBoneTransform);
@@ -1112,6 +1143,13 @@ TSharedPtr<FJsonValue> FAnimationHandlers::PopulateBlendspace(const TSharedPtr<F
 		}
 	}
 
+	// #710: rebuild BlendSpaceData (Segments/Triangles). Without this the
+	// blendspace is un-triangulated and a BlendSpacePlayer outputs the ref
+	// pose at runtime until the asset is opened in the editor (which calls
+	// ResampleData itself). Bare PostEditChange does NOT rebuild triangulation.
+	BS->ResampleData();
+	BS->ValidateSampleData();
+
 	BS->PostEditChange();
 	BS->MarkPackageDirty();
 	UEditorAssetLibrary::SaveLoadedAsset(BS, /*bOnlyIfIsDirty*/ true);
@@ -1171,6 +1209,9 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AddBlendSample(const TSharedPtr<FJson
 			TEXT("BlendSpace::AddSample rejected position (%.3f, %.3f) - check axis ranges via read_blendspace."),
 			PosX, PosY));
 	}
+	// #710: retriangulate so the sample is usable at runtime without a manual editor open.
+	BlendSpace->ResampleData();
+	BlendSpace->ValidateSampleData();
 	BlendSpace->PostEditChange();
 	SaveAssetPackage(BlendSpace);
 
@@ -1263,6 +1304,9 @@ TSharedPtr<FJsonValue> FAnimationHandlers::SetBlendSample(const TSharedPtr<FJson
 		return MCPError(TEXT("Nothing to update - provide position {x,y} and/or animation"));
 	}
 
+	// #710: retriangulate so the edited sample interpolates at runtime.
+	BlendSpace->ResampleData();
+	BlendSpace->ValidateSampleData();
 	BlendSpace->PostEditChange();
 	SaveAssetPackage(BlendSpace);
 
@@ -1352,18 +1396,33 @@ TSharedPtr<FJsonValue> FAnimationHandlers::SetMontageSequence(const TSharedPtr<F
 
 	FSlotAnimationTrack& SlotTrack = Montage->SlotAnimTracks[TrackIdx];
 
-	// Replace the animation in all segments of this track
-	int32 SegmentsUpdated = 0;
-	for (FAnimSegment& Segment : SlotTrack.AnimTrack.AnimSegments)
+	// #626: when segmentIndex is given, replace only that one segment's
+	// sequence; otherwise replace every segment in the slot (prior behavior).
+	const bool bHasSegmentIndex = Params->HasField(TEXT("segmentIndex"));
+	const int32 SegmentIndex = OptionalInt(Params, TEXT("segmentIndex"), -1);
+	if (bHasSegmentIndex)
 	{
+		if (SegmentIndex < 0 || SegmentIndex >= SlotTrack.AnimTrack.AnimSegments.Num())
+		{
+			return MCPError(FString::Printf(TEXT("segmentIndex %d out of range (slot has %d segments)"),
+				SegmentIndex, SlotTrack.AnimTrack.AnimSegments.Num()));
+		}
+	}
+
+	// Replace the animation in the target segment(s) of this track
+	int32 SegmentsUpdated = 0;
+	for (int32 SegIdx = 0; SegIdx < SlotTrack.AnimTrack.AnimSegments.Num(); ++SegIdx)
+	{
+		if (bHasSegmentIndex && SegIdx != SegmentIndex) continue;
+		FAnimSegment& Segment = SlotTrack.AnimTrack.AnimSegments[SegIdx];
 		Segment.SetAnimReference(NewSequence);
 		Segment.AnimStartTime = 0.0f;
 		Segment.AnimEndTime = NewSequence->GetPlayLength();
 		SegmentsUpdated++;
 	}
 
-	// If no segments exist, add one
-	if (SegmentsUpdated == 0)
+	// If no segments exist, add one (only in whole-slot mode).
+	if (SegmentsUpdated == 0 && !bHasSegmentIndex)
 	{
 		FAnimSegment NewSegment;
 		NewSegment.SetAnimReference(NewSequence);
@@ -1398,6 +1457,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::SetMontageSequence(const TSharedPtr<F
 	Result->SetStringField(TEXT("animSequencePath"), AnimSequencePath);
 	Result->SetStringField(TEXT("slotName"), SlotTrack.SlotName.ToString());
 	Result->SetNumberField(TEXT("segmentsUpdated"), SegmentsUpdated);
+	if (bHasSegmentIndex) Result->SetNumberField(TEXT("segmentIndex"), SegmentIndex);
 	Result->SetNumberField(TEXT("sequenceLength"), NewSequence->GetPlayLength());
 	Result->SetNumberField(TEXT("montageLength"), NewTotalLength);
 

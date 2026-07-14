@@ -1,7 +1,7 @@
 {
   "name": "ue-mcp",
-  "version": "1.0.84",
-  "description": "Unreal Engine MCP server - 28 tools, 609+ actions for AI-driven editor control",
+  "version": "1.1.20",
+  "description": "Unreal Engine MCP server - 31 tools, 830+ actions for AI-driven editor control",
   "type": "module",
   "main": "dist/index.js",
   "exports": {
@@ -75,9 +75,11 @@
     "test:networking": "vitest run tests/smoke/networking.test.ts",
     "test:gas": "vitest run tests/smoke/gas.test.ts",
     "test:smoke": "node scripts/smoke-test.js",
+    "context-tax": "node scripts/context-tax.mjs",
     "generate": "tsx scripts/generate-default-config.ts",
     "generate:metadata": "tsx scripts/generate-tool-metadata.ts",
-    "prepublishOnly": "npx tsc && tsx scripts/generate-default-config.ts && tsx scripts/generate-tool-metadata.ts"
+    "prepublishOnly": "npx tsc && tsx scripts/generate-default-config.ts && tsx scripts/generate-tool-metadata.ts",
+    "gen:epic-docs": "npx tsc && node scripts/gen-epic-docs.mjs"
   },
   "dependencies": {
     "@db-lyon/flowkit": "~0.5.3",

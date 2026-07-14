@@ -14,7 +14,9 @@
 #include "Factories/FbxFactory.h"
 #include "Factories/FbxImportUI.h"
 #include "Factories/FbxStaticMeshImportData.h"
+#include "Factories/FbxSkeletalMeshImportData.h"
 #include "Factories/FbxAnimSequenceImportData.h"
+#include "Animation/MorphTarget.h"
 #include "Factories/TextureFactory.h"
 #include "Factories/ReimportTextureFactory.h"
 #include "Factories/CSVImportFactory.h"
@@ -214,6 +216,12 @@ TSharedPtr<FJsonValue> FAssetHandlers::ImportStaticMesh(const TSharedPtr<FJsonOb
 		{
 			ImportUI->StaticMeshImportData->bGenerateLightmapUVs = bGenerateLightmapUVs;
 		}
+		// #687: metre-authored FBX unit conversion. Default 1.0 leaves cm FBX
+		// untouched; pass 100 for metre FBX.
+		if (Params->HasField(TEXT("importUniformScale")) && ImportUI->StaticMeshImportData)
+		{
+			ImportUI->StaticMeshImportData->ImportUniformScale = (float)OptionalNumber(Params, TEXT("importUniformScale"), 1.0);
+		}
 
 		FbxFactory->ImportUI = ImportUI;
 	}
@@ -338,12 +346,27 @@ TSharedPtr<FJsonValue> FAssetHandlers::ImportSkeletalMesh(const TSharedPtr<FJson
 		}
 	}
 
+	// #678: morph targets + physics asset creation controls.
+	const bool bImportMorphTargets = OptionalBool(Params, TEXT("importMorphTargets"), true);
+	const bool bCreatePhysicsAsset = OptionalBool(Params, TEXT("createPhysicsAsset"), false);
+	ImportUI->bCreatePhysicsAsset = bCreatePhysicsAsset;
+	if (ImportUI->SkeletalMeshImportData)
+	{
+		ImportUI->SkeletalMeshImportData->bImportMorphTargets = bImportMorphTargets;
+		// #687: metre-authored FBX (Blender FBX_SCALE_ALL) lands 100x too small
+		// on a cm skeleton. Expose the uniform-scale knob; default 1.0 leaves
+		// cm-authored FBX untouched. Pass 100 for metre FBX.
+		const double UniformScale = OptionalNumber(Params, TEXT("importUniformScale"), 1.0);
+		ImportUI->SkeletalMeshImportData->ImportUniformScale = (float)UniformScale;
+	}
+
 	FbxFactory->ImportUI = ImportUI;
 
 	UAssetImportTask* Task = NewObject<UAssetImportTask>();
 	FGCRootScope TaskRoot(Task);
 	Task->bAutomated = true;
-	Task->bReplaceExisting = true;
+	// #678: replace_existing now a param (default true preserves prior behavior).
+	Task->bReplaceExisting = OptionalBool(Params, TEXT("replaceExisting"), true);
 	Task->bSave = false;
 	Task->Filename = FileName;
 	Task->DestinationPath = DestinationPath;
@@ -385,6 +408,32 @@ TSharedPtr<FJsonValue> FAssetHandlers::ImportSkeletalMesh(const TSharedPtr<FJson
 	Result->SetArrayField(TEXT("importedAssets"), ImportedPaths);
 	Result->SetNumberField(TEXT("importedCount"), ImportedPaths.Num());
 	Result->SetBoolField(TEXT("success"), ImportedPaths.Num() > 0);
+	Result->SetNumberField(TEXT("importUniformScale"), OptionalNumber(Params, TEXT("importUniformScale"), 1.0));
+
+	// #678: post-import readback so a caller can confirm scale (box extent),
+	// morph-target names, and LOD count without a second round-trip.
+	for (UObject* Obj : Task->GetObjects())
+	{
+		if (USkeletalMesh* SkelMesh = Cast<USkeletalMesh>(Obj))
+		{
+			const FBoxSphereBounds Bounds = SkelMesh->GetBounds();
+			Result->SetObjectField(TEXT("boxExtent"), MCPVec3ToJsonObject(Bounds.BoxExtent));
+			Result->SetNumberField(TEXT("boundsRadius"), Bounds.SphereRadius);
+			TArray<TSharedPtr<FJsonValue>> MorphNames;
+			for (UMorphTarget* MT : SkelMesh->GetMorphTargets())
+			{
+				if (MT) MorphNames.Add(MakeShared<FJsonValueString>(MT->GetName()));
+			}
+			Result->SetArrayField(TEXT("morphTargets"), MorphNames);
+			Result->SetNumberField(TEXT("morphTargetCount"), MorphNames.Num());
+			Result->SetNumberField(TEXT("numLODs"), SkelMesh->GetLODNum());
+			if (USkeleton* Sk = SkelMesh->GetSkeleton())
+			{
+				Result->SetStringField(TEXT("skeleton"), Sk->GetPathName());
+			}
+			break;
+		}
+	}
 	if (ImportedPaths.Num() == 0)
 	{
 		Result->SetStringField(TEXT("error"), TEXT("Import task completed but no assets were produced"));
@@ -949,6 +998,35 @@ TSharedPtr<FJsonValue> FAssetHandlers::ImportTexture(const TSharedPtr<FJsonObjec
 	if (ImportedPaths.Num() == 0)
 	{
 		Result->SetStringField(TEXT("error"), TEXT("Import task completed but no assets were produced"));
+	}
+
+	// #661: honor sRGB / compressionSettings / lodGroup at import time. The
+	// UTextureFactory does not take these, so apply them to the imported
+	// texture in the same call (folding in the set_texture_settings path) so
+	// callers no longer need a second round-trip.
+	if (ImportedPaths.Num() == 1 &&
+		(Params->HasField(TEXT("sRGB")) || Params->HasField(TEXT("compressionSettings")) ||
+		 Params->HasField(TEXT("lodGroup")) || Params->HasField(TEXT("neverStream"))))
+	{
+		TSharedPtr<FJsonObject> SettingsParams = MakeShared<FJsonObject>();
+		SettingsParams->SetStringField(TEXT("assetPath"), ImportedPaths[0]->AsString());
+		if (Params->HasField(TEXT("sRGB"))) SettingsParams->SetBoolField(TEXT("sRGB"), OptionalBool(Params, TEXT("sRGB"), true));
+		if (Params->HasField(TEXT("compressionSettings"))) SettingsParams->SetStringField(TEXT("compressionSettings"), OptionalString(Params, TEXT("compressionSettings")));
+		if (Params->HasField(TEXT("lodGroup"))) SettingsParams->SetStringField(TEXT("lodGroup"), OptionalString(Params, TEXT("lodGroup")));
+		if (Params->HasField(TEXT("neverStream"))) SettingsParams->SetBoolField(TEXT("neverStream"), OptionalBool(Params, TEXT("neverStream"), false));
+		TSharedPtr<FJsonValue> SettingsResult = SetTextureProperties(SettingsParams);
+		if (SettingsResult.IsValid() && SettingsResult->AsObject().IsValid())
+		{
+			const TSharedPtr<FJsonObject> SO = SettingsResult->AsObject();
+			bool bSettingsOk = false;
+			SO->TryGetBoolField(TEXT("success"), bSettingsOk);
+			Result->SetBoolField(TEXT("settingsApplied"), bSettingsOk);
+			const TArray<TSharedPtr<FJsonValue>>* Mod = nullptr;
+			if (SO->TryGetArrayField(TEXT("modifiedProperties"), Mod) && Mod)
+			{
+				Result->SetArrayField(TEXT("appliedSettings"), *Mod);
+			}
+		}
 	}
 
 	if (ImportedPaths.Num() == 1)
@@ -1749,10 +1827,11 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetDataTableRow(const TSharedPtr<FJsonObj
 	bool bOk = true;
 	for (const auto& Pair : (*RowObj)->Values)
 	{
+		const FString FieldName(*Pair.Key);
 		FProperty* FieldProp = nullptr;
 		for (TFieldIterator<FProperty> It(RowStruct); It; ++It)
 		{
-			if (It->GetName() == Pair.Key || It->GetAuthoredName() == Pair.Key)
+			if (It->GetName() == FieldName || It->GetAuthoredName() == FieldName)
 			{
 				FieldProp = *It;
 				break;
@@ -1760,7 +1839,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetDataTableRow(const TSharedPtr<FJsonObj
 		}
 		if (!FieldProp)
 		{
-			SetErr = FString::Printf(TEXT("row struct '%s' has no field '%s'"), *RowStruct->GetName(), *Pair.Key);
+			SetErr = FString::Printf(TEXT("row struct '%s' has no field '%s'"), *RowStruct->GetName(), *FieldName);
 			bOk = false;
 			break;
 		}
@@ -1768,7 +1847,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetDataTableRow(const TSharedPtr<FJsonObj
 		FString E;
 		if (!MCPJsonProperty::SetJsonOnProperty(FieldProp, FieldAddr, Pair.Value, E))
 		{
-			SetErr = FString::Printf(TEXT("%s: %s"), *Pair.Key, *E);
+			SetErr = FString::Printf(TEXT("%s: %s"), *FieldName, *E);
 			bOk = false;
 			break;
 		}
@@ -2277,7 +2356,13 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetStringTableEntry(const TSharedPtr<FJso
 	const bool bExisted = StringTable->GetStringTable()->GetSourceString(EntryKey, PreviousSourceString);
 
 	StringTable->Modify(true);
+	// The 3-arg SetSourceString (with a trailing metadata/namespace arg) is UE 5.8+.
+	// 5.7 (and non-editor) take the 2-arg form.
+#if WITH_EDITORONLY_DATA && (ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8))
+	StringTable->GetMutableStringTable()->SetSourceString(EntryKey, SourceString, FString());
+#else
 	StringTable->GetMutableStringTable()->SetSourceString(EntryKey, SourceString);
+#endif
 	SaveAssetPackage(StringTable);
 
 	auto Result = MCPSuccess();
@@ -2513,3 +2598,81 @@ TSharedPtr<FJsonValue> FAssetHandlers::ExportAsset(const TSharedPtr<FJsonObject>
 // ─── #150 asset(get_referencers) ────────────────────────────────────
 // Reverse dependency lookup per package. Feeds the common "what uses this
 // texture / material?" question without dropping into Python.
+
+// #697: export a Texture2D to a PNG on disk (UTextureExporterPNG, auto-found
+// from the .png extension). Lets a look-dev workflow pull a texture out for
+// inspection or external diffing.
+TSharedPtr<FJsonValue> FAssetHandlers::ExportTexture(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
+	FString OutputPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("outputPath"), TEXT("filePath"), OutputPath)) return Err;
+
+	UTexture2D* Texture = Cast<UTexture2D>(UEditorAssetLibrary::LoadAsset(AssetPath));
+	if (!Texture) return MCPError(FString::Printf(TEXT("Texture2D not found: %s"), *AssetPath));
+
+	FString AbsPath = OutputPath;
+	if (FPaths::IsRelative(AbsPath)) AbsPath = FPaths::Combine(FPaths::ProjectDir(), AbsPath);
+	if (!AbsPath.EndsWith(TEXT(".png"))) AbsPath += TEXT(".png");
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(AbsPath), /*Tree*/ true);
+
+	UAssetExportTask* Task = NewObject<UAssetExportTask>();
+	FGCRootScope TaskRoot(Task);
+	Task->Object = Texture;
+	Task->Filename = AbsPath;
+	Task->bAutomated = true;
+	Task->bPrompt = false;
+	Task->bReplaceIdentical = true;
+	const bool bOk = UExporter::RunAssetExportTask(Task);
+	const int64 Size = IFileManager::Get().FileSize(*AbsPath);
+	if (!bOk || Size < 0) return MCPError(FString::Printf(TEXT("Texture export failed for %s"), *AssetPath));
+
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetStringField(TEXT("assetPath"), AssetPath);
+	Result->SetStringField(TEXT("path"), AbsPath);
+	Result->SetNumberField(TEXT("width"), Texture->GetSizeX());
+	Result->SetNumberField(TEXT("height"), Texture->GetSizeY());
+	Result->SetNumberField(TEXT("sizeBytes"), (double)Size);
+	return MCPResult(Result);
+}
+
+// #697: compare two textures by dimensions, pixel format, and source content
+// identity (FTextureSource::GetIdString) so a look-dev workflow can tell
+// whether an authored texture actually changed without pixel-diffing offline.
+TSharedPtr<FJsonValue> FAssetHandlers::CompareTextures(const TSharedPtr<FJsonObject>& Params)
+{
+	FString PathA, PathB;
+	if (auto Err = RequireStringAlt(Params, TEXT("assetPathA"), TEXT("a"), PathA)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("assetPathB"), TEXT("b"), PathB)) return Err;
+
+	UTexture2D* A = Cast<UTexture2D>(UEditorAssetLibrary::LoadAsset(PathA));
+	UTexture2D* B = Cast<UTexture2D>(UEditorAssetLibrary::LoadAsset(PathB));
+	if (!A) return MCPError(FString::Printf(TEXT("Texture2D not found: %s"), *PathA));
+	if (!B) return MCPError(FString::Printf(TEXT("Texture2D not found: %s"), *PathB));
+
+	const bool bSameDims = A->GetSizeX() == B->GetSizeX() && A->GetSizeY() == B->GetSizeY();
+	const bool bSameFormat = A->GetPixelFormat() == B->GetPixelFormat();
+#if WITH_EDITORONLY_DATA
+	const FString IdA = A->Source.GetIdString();
+	const FString IdB = B->Source.GetIdString();
+	const bool bSameSource = (IdA == IdB);
+#else
+	const FString IdA, IdB; const bool bSameSource = false;
+#endif
+	const bool bIdentical = bSameDims && bSameFormat && bSameSource;
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("assetPathA"), PathA);
+	Result->SetStringField(TEXT("assetPathB"), PathB);
+	Result->SetBoolField(TEXT("identical"), bIdentical);
+	Result->SetBoolField(TEXT("sameDimensions"), bSameDims);
+	Result->SetBoolField(TEXT("sameFormat"), bSameFormat);
+	Result->SetBoolField(TEXT("sameSourceContent"), bSameSource);
+	Result->SetNumberField(TEXT("widthA"), A->GetSizeX());
+	Result->SetNumberField(TEXT("heightA"), A->GetSizeY());
+	Result->SetNumberField(TEXT("widthB"), B->GetSizeX());
+	Result->SetNumberField(TEXT("heightB"), B->GetSizeY());
+	return MCPResult(Result);
+}
