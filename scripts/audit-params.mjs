@@ -64,7 +64,7 @@ function paramTokens(text) {
   return [...new Set(names)];
 }
 
-const cats = ["project","asset","blueprint","level","material","animation","niagara","landscape","pcg","foliage","audio","widget","gameplay","statetree","gas","networking","editor","reflection","demo","feedback"];
+const cats = ["project","quest_pso","asset","blueprint","level","material","animation","niagara","landscape","pcg","foliage","audio","widget","gameplay","statetree","gas","networking","editor","reflection","demo","feedback"];
 
 let issues = 0;
 for (const c of cats) {

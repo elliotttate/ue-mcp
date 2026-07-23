@@ -32,7 +32,7 @@ function docActions(section) {
   return rows;
 }
 
-const cats = ["project","asset","blueprint","level","material","animation","niagara","landscape","pcg","foliage","audio","widget","gameplay","statetree","gas","networking","editor","reflection","demo","feedback"];
+const cats = ["project","quest_pso","asset","blueprint","level","material","animation","niagara","landscape","pcg","foliage","audio","widget","gameplay","statetree","gas","networking","editor","reflection","demo","feedback"];
 
 let totalMissing = 0;
 let totalExtra = 0;

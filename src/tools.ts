@@ -8,6 +8,7 @@
 import type { ToolDef } from "./types.js";
 
 import { projectTool } from "./tools/project.js";
+import { questPsoTool } from "./tools/quest_pso.js";
 import { assetTool } from "./tools/asset.js";
 import { blueprintTool } from "./tools/blueprint.js";
 import { levelTool } from "./tools/level.js";
@@ -44,6 +45,7 @@ import { fabTool } from "./tools/fab.js";
 
 export const ALL_TOOLS: ToolDef[] = [
   projectTool,
+  questPsoTool,
   assetTool,
   blueprintTool,
   levelTool,

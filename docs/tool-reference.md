@@ -2,7 +2,7 @@
 
 This page lists ue-mcp's own category tools and actions. For the official Unreal 5.8 tools that ue-mcp wraps (surfaced inside these same categories), see [Native Tools](native-tools.md).
 
-UE-MCP exposes **<!-- count:tools -->31<!-- /count --> category tools** covering **<!-- count:actions -->830+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
+UE-MCP exposes **<!-- count:tools -->32<!-- /count --> category tools** covering **<!-- count:actions -->837+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
 
 !!! tip "First call in any session"
     Start with `project(action="get_status")` to check the connection, then `level(action="get_outliner")` or `asset(action="list")` to explore.
@@ -50,6 +50,21 @@ UE-MCP exposes **<!-- count:tools -->31<!-- /count --> category tools** covering
 | `read_source_file` | Read a .h/.cpp/.inl from a named module's folder (companion to write_source_file; resolves plugin modules too). With no visibility it tries Public then Private then the module root. Params: `module, visibility?, fileName` |
 | `add_module_dependency` | Add a module to a target module's Build.cs dependency array. Params: `moduleName (the Build.cs to edit - must exist in the project), dependency (module name to add, e.g. 'UMG'), access? ('public'\|'private', default 'private')` |
 | `add_cpp_member` | Append a UPROPERTY/UFUNCTION declaration to an existing UCLASS header inside the access specifier you choose. Idempotent: if a declaration containing the same memberName is already present, returns existed:true. Params: `headerPath (relative to Source/ or absolute), declaration (full multi-line UPROPERTY(...) / UFUNCTION(...) block plus its single-line member or function signature), memberName (the identifier the declaration introduces - used for idempotency), access? ('public'\|'protected'\|'private', default 'public')` |
+
+---
+
+## quest_pso
+
+*Host-side Quest/Android shader pipeline cache recording. Requires exactly one adb device and explicit project/engine paths. See [Quest PSO harvests](quest-pso.md) for the protocol and end-to-end workflow.*
+
+| Action | Description |
+|--------|-------------|
+| `preflight` | Verify adb, exactly one ready device, installed package, explicit `.uproject`/engine paths, `UnrealEditor-Cmd`, and cooked Android ASTC `.shk` files. Params: `projectPath, enginePath, packageName, adbPath?` |
+| `clear_launch` | Clear prior recordings plus writable Unreal/Vulkan caches and launch with mandatory `-logPSO`; refuses bundled-cache risk unless explicitly acknowledged. Params: `projectPath, enginePath, packageName, adbPath?, devicePort?, launchArgs?, allowBundledCacheRisk?` |
+| `command` | Send one console command through an ephemeral adb forward to RQDevServer and validate its JSON response. Params: `command, adbPath?, devicePort?, timeoutMs?` |
+| `save` | Send the exact `r.ShaderPipelineCache.Save` command through RQDevServer. Params: `adbPath?, devicePort?, timeoutMs?` |
+| `validate` | Validate the latest RQPSO `TourStart`, unique `LevelDone`, and `TourDone` markers from UE logcat. Params: `adbPath?` |
+| `collect_expand` | Save, stop, pull every recording, expand using explicit paths, verify non-empty output, and transactionally publish both Android Build caches. Existing `.spc` files require explicit backed-up replacement. Tour checks default to auto: any RQPSO marker requires a complete valid tour. Params: `projectPath, enginePath, packageName, adbPath?, devicePort?, commandTimeoutMs?, requireCompleteTour?, saveBeforePull?, copyToBuild?, replaceExistingBuildCaches?, outputRoot?` |
 
 ---
 
