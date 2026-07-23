@@ -141,6 +141,7 @@ UE-MCP exposes **<!-- count:tools -->31<!-- /count --> category tools** covering
 | `diagnose_registry` | Scan a content path and compare disk vs AssetRegistry (including in-memory pending-kill entries). Returns onDiskCount, inMemoryIncludedCount, ghostCount and paths. Params: `path, recursive? (default true), reconcile? (forceRescan=true)` |
 | `get_mesh_bounds` | Get StaticMesh OR SkeletalMesh bounding box. Params: `assetPath` |
 | `get_mesh_info` | One-call mesh QA: bounds + material slots + skeleton + LOD/vertex counts. Works for both UStaticMesh and USkeletalMesh. Params: `assetPath` |
+| `proxy_overlap_audit` | Read-only StaticMesh proxy QA for distant z-fighting. Audits LOD0 source geometry for tolerance-quantized duplicate, opposite-facing coincident, and degenerate triangles; reports PixelDepthOffset coverage and built render-buffer counts. Params: `assetPath?`, `directory?`, `lodIndex?`, `toleranceCm?`, `recursive?`, `offset?`, `maxResults?`, `maxExamples?` |
 | `read_import_sources` | Read AssetImportData source filenames on an imported asset (StaticMesh, SkeletalMesh, Texture, Animation, etc.). Returns sources[] of {relativeFilename, absolutePath, timestamp, fileHash, displayLabelName}. Params: `assetPath (#270)` |
 | `get_mesh_collision` | Inspect StaticMesh collision setup. Params: `assetPath` |
 | `move_folder` | Move/rename entire content folder with redirector fixup in one transaction. Params: `sourcePath, destinationPath (#192)` |

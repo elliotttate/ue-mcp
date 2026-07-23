@@ -271,6 +271,7 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// v1.0.0-rc.3 — #177, #192, #193
 	Registry.RegisterHandler(TEXT("get_mesh_bounds"), &GetMeshBounds);
 	Registry.RegisterHandler(TEXT("get_mesh_info"), &GetMeshInfo);
+	Registry.RegisterHandler(TEXT("proxy_overlap_audit"), &ProxyOverlapAudit);
 	Registry.RegisterHandler(TEXT("read_import_sources"), &ReadImportSources);
 	Registry.RegisterHandler(TEXT("get_mesh_collision"), &GetMeshCollision);
 	Registry.RegisterHandler(TEXT("set_mesh_nav"), &SetMeshNav);

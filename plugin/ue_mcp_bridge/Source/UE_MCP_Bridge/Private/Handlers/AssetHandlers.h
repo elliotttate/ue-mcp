@@ -127,6 +127,8 @@ private:
 	static TSharedPtr<FJsonValue> GetMeshBounds(const TSharedPtr<FJsonObject>& Params);
 	// #431: one-call mesh QA - bounds + materials + LOD/vertex/skeleton.
 	static TSharedPtr<FJsonValue> GetMeshInfo(const TSharedPtr<FJsonObject>& Params);
+	// Read-only LOD0 geometry/material audit for proxy z-fighting risks.
+	static TSharedPtr<FJsonValue> ProxyOverlapAudit(const TSharedPtr<FJsonObject>& Params);
 	// #593: list bones (names + rest-pose transforms) from a SkeletalMesh/Skeleton asset.
 	static TSharedPtr<FJsonValue> ListSkeletonBones(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetMeshCollision(const TSharedPtr<FJsonObject>& Params);
