@@ -92,6 +92,28 @@ public:
 		return Result;
 	}
 
+	int32 GetWriteIndex() const
+	{
+		return WriteIndex.Load();
+	}
+
+	TArray<FMCPLogLine> GetLinesSince(int32 Cursor, bool& OutOverwritten, int32& OutEnd) const
+	{
+		FScopeLock Lock(&CritSection);
+		const int32 End = WriteIndex.Load();
+		OutEnd = End;
+		const int32 Oldest = FMath::Max(End - MaxLines, 0);
+		OutOverwritten = Cursor < Oldest;
+		const int32 Start = FMath::Clamp(Cursor, Oldest, End);
+		TArray<FMCPLogLine> Result;
+		Result.Reserve(End - Start);
+		for (int32 Index = Start; Index < End; ++Index)
+		{
+			Result.Add(Lines[Index % MaxLines]);
+		}
+		return Result;
+	}
+
 private:
 	FMCPLogCapture() : WriteIndex(0), bInstalled(false) { Lines.SetNum(MaxLines); }
 	~FMCPLogCapture() { Uninstall(); }

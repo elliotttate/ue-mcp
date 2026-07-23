@@ -45,7 +45,7 @@ export const editorTool: ToolDef = categoryTool(
         return { ...result, output: lines.join("") };
       },
     },
-    execute_command: bp("Run console command. Params: command", "execute_command"),
+    execute_command: bp("Run a console command in the editor or PIE world. Params: command, world? (auto|editor|pie), captureLog? (return fresh log lines observed while the synchronous command executes), logFilter?, maxLines? (default 100; retains the last matches). Fresh log capture avoids stale search_log matches for machine-readable diagnostics.", "execute_command", (p) => ({ command: p.command, world: p.world, captureLog: p.captureLog, logFilter: p.logFilter, maxLines: p.maxLines })),
     execute_python: {
       description: "GATED LAST RESORT. execute_python is unreachable until a semantic tool search over your taskSummary has been run AND every candidate it returns is EXPLICITLY ruled out with a stated reason. Flow: (1) call with taskSummary (+code) - it returns the candidate actions; (2) re-call with the same taskSummary/code PLUS ruledOut=[{action, reason}] giving a specific reason each candidate does not fit. Python runs only once every candidate is ruled out. Params: code, taskSummary (required), ruledOut? (#704)",
       handler: async (ctx: ToolContext, params: Record<string, unknown>) => {
@@ -284,6 +284,8 @@ export const editorTool: ToolDef = categoryTool(
   undefined,
   {
     command: z.string().optional(),
+    captureLog: z.boolean().optional().describe("execute_command: capture fresh log lines observed while the synchronous command executes"),
+    logFilter: z.string().optional().describe("execute_command: case-insensitive filter applied only to freshly captured lines"),
     code: z.string().optional(),
     taskSummary: z.string().optional().describe("execute_python: plain-words intent, searched against the tool registry to gate the call (#704)"),
     ruledOut: z.array(z.object({ action: z.string(), reason: z.string() })).optional().describe("execute_python: reason each searched candidate action does not fit; every candidate must be ruled out before Python runs (#704)"),
@@ -302,7 +304,7 @@ export const editorTool: ToolDef = categoryTool(
     actorArgs: z.record(z.string()).optional().describe("invoke_function: map of UObject* parameter name to actor label, resolved against live actors in the active world (#383)"),
     className: z.string().optional().describe("invoke_static_function: UBlueprintFunctionLibrary class - short name or /Script/Module.Class path"),
     worldContextParam: z.string().optional().describe("invoke_static_function: name of a UObject* param to fill with the editor/PIE world (auto-detected for params named WorldContextObject)"),
-    world: z.string().optional().describe("invoke_function world scope: editor (default) | pie"),
+    world: z.string().optional().describe("World scope for supported actions: auto | editor | pie"),
     propertyName: z.string().optional(),
     propertyNames: z.array(z.string()).optional().describe("describe_object: optional dotted/indexed property paths to describe"),
     includeProperties: z.boolean().optional().describe("describe_object: include reflected property metadata (default true)"),

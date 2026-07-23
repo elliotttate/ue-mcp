@@ -235,12 +235,63 @@ TSharedPtr<FJsonValue> FEditorHandlers::ExecuteCommand(const TSharedPtr<FJsonObj
 	FString Command;
 	if (auto Err = RequireString(Params, TEXT("command"), Command)) return Err;
 
-	REQUIRE_EDITOR_WORLD(World);
+	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("auto"));
+	const bool bCaptureLog = OptionalBool(Params, TEXT("captureLog"), false);
+	const FString LogFilter = OptionalString(Params, TEXT("logFilter"));
+	const int32 MaxCapturedLines = FMath::Clamp(OptionalInt(Params, TEXT("maxLines"), 100), 1, 1000);
+	UWorld* World = ResolveWorldScope(WorldScope);
+	if (!World)
+	{
+		return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
+	}
 
-	UKismetSystemLibrary::ExecuteConsoleCommand(World, Command, nullptr);
+	const int32 LogCursorStart = bCaptureLog ? FMCPLogCapture::Get().GetWriteIndex() : 0;
+	const bool bHandled = GEngine && GEngine->Exec(World, *Command);
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("command"), Command);
+	Result->SetStringField(TEXT("world"), World->GetName());
+	Result->SetNumberField(TEXT("worldType"), static_cast<int32>(World->WorldType));
+	Result->SetBoolField(TEXT("handled"), bHandled);
+	if (bCaptureLog)
+	{
+		bool bLogOverwritten = false;
+		int32 LogCursorEnd = LogCursorStart;
+		const TArray<FMCPLogCapture::FMCPLogLine> FreshLines =
+			FMCPLogCapture::Get().GetLinesSince(LogCursorStart, bLogOverwritten, LogCursorEnd);
+		TArray<FMCPLogCapture::FMCPLogLine> MatchingLines;
+		for (const FMCPLogCapture::FMCPLogLine& Line : FreshLines)
+		{
+			if (!LogFilter.IsEmpty() &&
+				!Line.Message.Contains(LogFilter, ESearchCase::IgnoreCase) &&
+				!Line.Category.Contains(LogFilter, ESearchCase::IgnoreCase))
+			{
+				continue;
+			}
+			MatchingLines.Add(Line);
+		}
+		const int32 MatchingLineCount = MatchingLines.Num();
+		const int32 FirstCapturedLine = FMath::Max(MatchingLineCount - MaxCapturedLines, 0);
+		TArray<TSharedPtr<FJsonValue>> CapturedLog;
+		CapturedLog.Reserve(MatchingLineCount - FirstCapturedLine);
+		for (int32 LineIndex = FirstCapturedLine; LineIndex < MatchingLineCount; ++LineIndex)
+		{
+			const FMCPLogCapture::FMCPLogLine& Line = MatchingLines[LineIndex];
+			TSharedPtr<FJsonObject> LineObject = MakeShared<FJsonObject>();
+			LineObject->SetStringField(TEXT("message"), Line.Message);
+			LineObject->SetStringField(TEXT("category"), Line.Category);
+			LineObject->SetStringField(TEXT("verbosity"), Line.Verbosity);
+			CapturedLog.Add(MakeShared<FJsonValueObject>(LineObject));
+		}
+		Result->SetNumberField(TEXT("logCursorStart"), LogCursorStart);
+		Result->SetNumberField(TEXT("logCursorEnd"), LogCursorEnd);
+		Result->SetStringField(TEXT("logFilter"), LogFilter);
+		Result->SetNumberField(TEXT("matchingLogLineCount"), MatchingLineCount);
+		Result->SetBoolField(TEXT("capturedLogOverwritten"), bLogOverwritten);
+		Result->SetBoolField(TEXT("capturedLogTruncated"),
+			bLogOverwritten || MatchingLineCount > CapturedLog.Num());
+		Result->SetArrayField(TEXT("capturedLog"), CapturedLog);
+	}
 	return MCPResult(Result);
 }
 
