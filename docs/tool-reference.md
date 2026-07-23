@@ -64,7 +64,7 @@ UE-MCP exposes **<!-- count:tools -->32<!-- /count --> category tools** covering
 | `command` | Send one console command through an ephemeral adb forward to RQDevServer and validate its JSON response. Params: `command, adbPath?, devicePort?, timeoutMs?` |
 | `save` | Send the exact `r.ShaderPipelineCache.Save` command through RQDevServer. Params: `adbPath?, devicePort?, timeoutMs?` |
 | `validate` | Validate the latest RQPSO `TourStart`, unique `LevelDone`, and `TourDone` markers from UE logcat. Params: `adbPath?` |
-| `collect_expand` | Save, stop, pull every recording, expand using explicit paths, verify non-empty output, and transactionally publish both Android Build caches. Existing `.spc` files require explicit backed-up replacement. Tour checks default to auto: any RQPSO marker requires a complete valid tour. Params: `projectPath, enginePath, packageName, adbPath?, devicePort?, commandTimeoutMs?, requireCompleteTour?, saveBeforePull?, copyToBuild?, replaceExistingBuildCaches?, outputRoot?` |
+| `collect_expand` | Save, stop, pull every recording, expand using explicit paths, verify non-empty output, and transactionally publish both Android Build caches. Existing `.spc` files require explicit backed-up replacement. A complete valid RQPSO tour is required by default; set `requireCompleteTour=false` only for legacy/no-tour builds. Params: `projectPath, enginePath, packageName, adbPath?, devicePort?, commandTimeoutMs?, requireCompleteTour?, saveBeforePull?, copyToBuild?, replaceExistingBuildCaches?, outputRoot?` |
 
 ---
 

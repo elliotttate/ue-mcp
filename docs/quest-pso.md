@@ -8,7 +8,7 @@ The `quest_pso` tool runs the host side of an Android/Quest shader pipeline cach
 - `projectPath` and `enginePath` must be explicit absolute paths. The tool verifies the `.uproject`, `UnrealEditor-Cmd`, Android package, and cooked Android ASTC `.shk` files before clearing or publishing anything.
 - `clear_launch` always supplies `-logPSO`, rejects `-NoLogPSO`, and clears `CollectedPSOs`, the writable Unreal pipeline cache, and the Vulkan program-binary cache before launching. If the local Build folders contain `.spc` files, it refuses to start unless `allowBundledCacheRisk=true` explicitly acknowledges a miss-only capture.
 - RQDevServer commands use `adb forward tcp:0 ...`, so adb allocates a collision-free local port. The forward is removed after the single request.
-- `collect_expand` writes each pull to a unique timestamped directory and verifies that expansion produced a non-empty `.spc` before copying it into either Build cache. Existing Build caches are refused by default; `replaceExistingBuildCaches=true` first backs up both old caches under the run directory and then replaces both through same-directory atomic renames with rollback. Tour validation defaults to auto: the presence of any RQPSO marker makes a complete valid tour mandatory, while a marker-free latest-main capture proceeds through strict artifact validation.
+- `collect_expand` requires a complete valid RQPSO tour by default, writes each pull to a unique timestamped directory, and verifies that expansion produced a non-empty `.spc` before copying it into either Build cache. Existing Build caches are refused by default; `replaceExistingBuildCaches=true` first backs up both old caches under the run directory and then replaces both through same-directory atomic renames with rollback.
 
 ## Device protocol
 
@@ -34,7 +34,7 @@ The `save` action sends the exact command `r.ShaderPipelineCache.Save`. RQDevSer
    - `Build/Android/PipelineCaches`
    - `Build/Android_ASTC/PipelineCaches`
 
-Latest main does not contain the experimental RQPSO marker tour. Leave `requireCompleteTour` omitted for auto detection, set it to true to require the tour, or set it to false to explicitly disable marker checks. Recording and `.spc` artifact validation always runs. `saveBeforePull` and `copyToBuild` default to true and can be disabled for diagnostic-only collection. `replaceExistingBuildCaches` defaults to false.
+`requireCompleteTour` defaults to true and fails closed when the RQPSO marker tour is missing, partial, or invalid. Set it to false explicitly only for a legacy/no-tour build such as latest main without the experimental RQPSO tour. Recording and `.spc` artifact validation always runs even when marker validation is disabled. `saveBeforePull` and `copyToBuild` default to true and can be disabled for diagnostic-only collection. `replaceExistingBuildCaches` defaults to false.
 
 ## Actions
 

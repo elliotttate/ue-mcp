@@ -780,26 +780,18 @@ export class QuestPsoHost {
     // cannot mutate either the device session or the Build tree.
     assertBuildPublicationAllowed(buildDestinations, replaceExistingBuildCaches);
 
-    // Auto policy: marker-capable builds fail closed as soon as any RQPSO
-    // marker is present, while latest main (host-driven RQAction/RQQuery, no
-    // marker tour) can still publish after strict artifact validation. true
-    // requires markers; false explicitly disables marker validation.
-    const markerPolicy = options.requireCompleteTour;
-    let tourValidationMode = markerPolicy === true
-      ? "required"
-      : (markerPolicy === false ? "disabled" : "auto_no_markers");
+    // Publishing fails closed by default: callers must either provide a
+    // complete RQPSO tour or explicitly opt out for legacy/no-tour builds.
+    const requireCompleteTour = options.requireCompleteTour !== false;
+    let tourValidationMode = requireCompleteTour ? "required" : "disabled";
     let harvestValidation: (HarvestValidation & { deviceSerial: string }) | null = null;
     let saveResult: RqCommandResult | null = null;
     try {
-      if (markerPolicy !== false) {
+      if (requireCompleteTour) {
         const validation = await this.readHarvestValidation(preflight.adbPath, preflight.device.serial);
-        const enforceMarkers = markerPolicy === true || validation.markerCount > 0;
-        if (enforceMarkers) {
-          harvestValidation = validation;
-          tourValidationMode = markerPolicy === true ? "required" : "auto_enforced";
-          if (!validation.valid) {
-            throw new Error(`Refusing to publish a partial PSO harvest: ${validation.reasons.join("; ")}`);
-          }
+        harvestValidation = validation;
+        if (!validation.valid) {
+          throw new Error(`Refusing to publish a partial PSO harvest: ${validation.reasons.join("; ")}`);
         }
       }
 

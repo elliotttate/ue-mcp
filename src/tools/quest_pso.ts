@@ -59,7 +59,7 @@ export const questPsoTool: ToolDef = categoryTool(
       }),
     },
     collect_expand: {
-      description: "Explicitly save through RQDevServer, stop the app, pull every .upipelinecache recording into a unique run directory, expand with cooked .shk files via the explicit engine/project paths, validate non-empty output, and transactionally copy the .spc to Android and Android_ASTC Build caches. Existing Build caches are refused unless replaceExistingBuildCaches=true, in which case they are backed up under the run directory first. Tour validation defaults to auto: any RQPSO marker makes a complete valid tour mandatory, while marker-free latest-main RQAction/RQQuery captures use artifact validation. Set requireCompleteTour=true to require markers or false to disable marker checks. Params: projectPath, enginePath, packageName, adbPath?, devicePort?, commandTimeoutMs?, requireCompleteTour? (default auto), saveBeforePull? (default true), copyToBuild? (default true), replaceExistingBuildCaches? (default false), outputRoot?",
+      description: "Explicitly save through RQDevServer, stop the app, pull every .upipelinecache recording into a unique run directory, expand with cooked .shk files via the explicit engine/project paths, validate non-empty output, and transactionally copy the .spc to Android and Android_ASTC Build caches. Existing Build caches are refused unless replaceExistingBuildCaches=true, in which case they are backed up under the run directory first. A complete valid RQPSO tour is required by default; set requireCompleteTour=false only for legacy/no-tour builds. Params: projectPath, enginePath, packageName, adbPath?, devicePort?, commandTimeoutMs?, requireCompleteTour? (default true), saveBeforePull? (default true), copyToBuild? (default true), replaceExistingBuildCaches? (default false), outputRoot?",
       handler: async (_ctx, params) => questPsoHost.collectExpand({
         ...setup(params),
         devicePort: params.devicePort as number | undefined,
@@ -84,7 +84,7 @@ export const questPsoTool: ToolDef = categoryTool(
     command: z.string().optional().describe("One newline-free RQDevServer console command; required by command."),
     launchArgs: z.array(z.string()).optional().describe("Extra launch arguments appended after mandatory -logPSO and -rqdevport; -NoLogPSO is rejected."),
     allowBundledCacheRisk: z.boolean().optional().describe("clear_launch: acknowledge local Build .spc files and allow an intentional miss-only capture (default false)."),
-    requireCompleteTour: z.boolean().optional().describe("collect_expand tour-marker policy: omitted=auto (enforce if any RQPSO marker exists), true=require a complete marker tour, false=disable marker checks. Recording/output validation always runs."),
+    requireCompleteTour: z.boolean().optional().describe("Require a complete valid RQPSO marker tour before collection (default true). Set false only for legacy/no-tour builds; recording/output validation still runs."),
     saveBeforePull: z.boolean().optional().describe("collect_expand: send r.ShaderPipelineCache.Save before stopping/pulling (default true)."),
     copyToBuild: z.boolean().optional().describe("collect_expand: copy validated .spc to Build/Android*/PipelineCaches (default true)."),
     replaceExistingBuildCaches: z.boolean().optional().describe("collect_expand: back up and transactionally replace existing Build .spc files (default false; otherwise existing files are refused)."),

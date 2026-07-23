@@ -171,7 +171,7 @@ describe("Quest PSO harvest validation", () => {
 });
 
 describe("Quest PSO collection and expansion", () => {
-  it("auto-detects any marker-capable run and refuses partial coverage before save/pull", async () => {
+  it("requires a complete marker tour by default, even when logcat has no markers", async () => {
     const fixture = makeFixture();
     const calls: string[][] = [];
     const runner: CommandRunner = async (_file, args) => {
@@ -179,13 +179,7 @@ describe("Quest PSO collection and expansion", () => {
       const base = baseAdbResult(args);
       if (base) return base;
       if (args.includes("logcat") && args.includes("-d")) {
-        return {
-          stdout: [
-            "UE RQPSO MARKER TourStart pass=main levels=2 seed=123",
-            "UE RQPSO MARKER LevelDone pass=main level=A index=0 psosLogged=17",
-          ].join("\n"),
-          stderr: "",
-        };
+        return { stdout: "UE no RQPSO coverage markers in this build", stderr: "" };
       }
       return { stdout: "", stderr: "" };
     };
@@ -201,6 +195,36 @@ describe("Quest PSO collection and expansion", () => {
     })).rejects.toThrow(/Refusing to publish a partial PSO harvest/);
     expect(calls.some((args) => args.includes("pull"))).toBe(false);
     expect(calls.some((args) => args.at(-1) === "setprop debug.ue.commandline ''")).toBe(true);
+  });
+
+  it("allows an explicit marker-validation opt-out for legacy/no-tour builds", async () => {
+    const fixture = makeFixture();
+    const calls: string[][] = [];
+    let saveSent = false;
+    const runner: CommandRunner = async (_file, args) => {
+      calls.push(args);
+      const base = baseAdbResult(args);
+      if (base) return base;
+      if (args.includes("forward") && args.includes("tcp:0")) return { stdout: "49153\n", stderr: "" };
+      return { stdout: "", stderr: "" };
+    };
+    const sender: LineSender = async (_host, _port, line) => {
+      expect(line).toBe("r.ShaderPipelineCache.Save");
+      saveSent = true;
+      return JSON.stringify({ ok: true, output: "saved" });
+    };
+    const host = new QuestPsoHost({ runCommand: runner, sendLine: sender, platform: "win32" });
+
+    await expect(host.collectExpand({
+      projectPath: fixture.projectPath,
+      enginePath: fixture.enginePath,
+      packageName: "com.Flat2VRStudios.RoboquestVR",
+      requireCompleteTour: false,
+      copyToBuild: false,
+    })).rejects.toThrow(/No \.upipelinecache recordings/);
+    expect(saveSent).toBe(true);
+    expect(calls.some((args) => args.includes("pull"))).toBe(true);
+    expect(calls.some((args) => args.includes("logcat") && args.includes("-d"))).toBe(false);
   });
 
   it("launches with -logPSO after clearing all device-side caches", async () => {
@@ -236,6 +260,17 @@ describe("Quest PSO collection and expansion", () => {
       calls.push({ file, args });
       const base = baseAdbResult(args);
       if (base) return base;
+      if (args.includes("logcat") && args.includes("-d")) {
+        return {
+          stdout: [
+            "UE RQPSO MARKER TourStart pass=main levels=2 seed=123",
+            "UE RQPSO MARKER LevelDone pass=main level=A index=0 psosLogged=17",
+            "UE RQPSO MARKER LevelDone pass=main level=B index=1 psosLogged=24",
+            "UE RQPSO MARKER TourDone pass=main ok=1 levels=2 psosLogged=24",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
       if (args.includes("forward") && args.includes("tcp:0")) return { stdout: "49153\n", stderr: "" };
       const pullIndex = args.indexOf("pull");
       if (pullIndex >= 0) {
